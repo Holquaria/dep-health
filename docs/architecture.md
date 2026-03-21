@@ -1,6 +1,6 @@
 # dep-health — Architecture
 
-This document covers the internal design of dep-health: package responsibilities, data flow, concurrency model, the risk-scoring formula, and the extension points for adding new ecosystems and advisors.
+This document covers the internal design of dep-health: package responsibilities, data flow, concurrency model, the risk-scoring formula, peer conflict detection, persistence, and the HTTP server/dashboard.
 
 ---
 
@@ -11,10 +11,13 @@ This document covers the internal design of dep-health: package responsibilities
 3. [Data model](#3-data-model)
 4. [Scanner package](#4-scanner-package)
 5. [Resolver package — concurrency model](#5-resolver-package--concurrency-model)
-6. [Scorer package — risk formula](#6-scorer-package--risk-formula)
+6. [Scorer package — risk formula and conflict detection](#6-scorer-package--risk-formula-and-conflict-detection)
 7. [Advisor package](#7-advisor-package)
-8. [External API contracts](#8-external-api-contracts)
-9. [Extension guide](#9-extension-guide)
+8. [Pipeline package](#8-pipeline-package)
+9. [Store package — SQLite persistence](#9-store-package--sqlite-persistence)
+10. [Server and dashboard](#10-server-and-dashboard)
+11. [External API contracts](#11-external-api-contracts)
+12. [Extension guide](#12-extension-guide)
 
 ---
 
@@ -26,19 +29,31 @@ The dependency graph is strictly layered — no import cycles are possible.
 graph TD
     main["main.go"]
     cmd["cmd/\n(cobra CLI)"]
+    pipeline["pipeline/\n(shared scan logic)"]
     scanner["scanner/\n(manifest parsing)"]
     resolver["resolver/\n(registry + CVE lookup)"]
-    scorer["scorer/\n(risk scoring)"]
+    scorer["scorer/\n(risk scoring + conflicts)"]
     advisor["advisor/\n(upgrade guidance)"]
+    store["store/\n(SQLite persistence)"]
+    server["server/\n(HTTP API + SPA)"]
+    web["web/\n(embedded frontend)"]
     models["models/\n(shared structs)"]
     config["config/\n(env vars)"]
 
     main --> cmd
-    cmd --> scanner
-    cmd --> resolver
-    cmd --> scorer
-    cmd --> advisor
-    cmd --> config
+    cmd --> pipeline
+    cmd --> server
+    cmd --> store
+
+    pipeline --> scanner
+    pipeline --> resolver
+    pipeline --> scorer
+    pipeline --> advisor
+    pipeline --> config
+
+    server --> pipeline
+    server --> store
+    server --> web
 
     scanner --> models
     resolver --> models
@@ -47,62 +62,84 @@ graph TD
 
     style models fill:#f0f4ff,stroke:#6c8ebf
     style config fill:#fff4e0,stroke:#d79b00
+    style web fill:#f0fff4,stroke:#82b366
 ```
 
-**Rule:** only `cmd/` may import all other packages. Domain packages (`scanner`, `resolver`, `scorer`, `advisor`) import only `models`. No domain package imports another domain package.
+**Rule:** only `cmd/` and `server/` may import multiple domain packages. Domain packages (`scanner`, `resolver`, `scorer`, `advisor`) import only `models`. `pipeline` orchestrates them but does not import `server` or `store`.
 
 ---
 
 ## 2. End-to-end pipeline
 
-The `dep-health scan <dir>` command runs five sequential stages. Registry lookups inside Stage 2 are parallelised; everything else is single-threaded.
+The pipeline is shared between the CLI and the HTTP server via `pipeline.Run()`. An optional clone step prepends the sequence when a `GitURL` is provided.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User
-    participant cmd as cmd/scan.go
+    participant entry as CLI / Server
+    participant git as git clone
+    participant pipeline as pipeline.Run()
     participant scanner as scanner.Discover()
     participant resolver as resolver.Enrich()
     participant npm as registry.npmjs.org
+    participant goproxy as proxy.golang.org
     participant osv as api.osv.dev
-    participant scorer as scorer.Score()
+    participant scorer as scorer.Score() + DetectConflicts()
     participant advisor as advisor.Advise()
 
-    User->>cmd: dep-health scan ./my-app
+    User->>entry: scan --git-url https://… (or local dir)
 
-    cmd->>scanner: Discover(dir, repoURL, scanners)
-    scanner-->>cmd: []Dependency (N packages)
-
-    cmd->>resolver: Enrich(ctx, deps)
-    note over resolver: spawns up to 10 goroutines<br/>one per dependency
-    par concurrent registry lookups
-        resolver->>npm: GET /lodash
-        npm-->>resolver: {dist-tags, versions}
-        resolver->>npm: GET /express
-        npm-->>resolver: {dist-tags, versions}
+    opt GitURL provided
+        entry->>git: git clone --depth 1 <url> /tmp/dep-health-clone-*
+        git-->>entry: temp dir path
     end
-    note over resolver: all goroutines finish (WaitGroup)
-    resolver->>osv: POST /v1/querybatch (all deps, one request)
-    osv-->>resolver: [{vulns:[...]}, ...]
-    resolver-->>cmd: []EnrichedDependency
 
-    cmd->>scorer: Score(enriched, crossRepoCounts)
-    scorer-->>cmd: []ScoredDependency (sorted desc by RiskScore)
+    entry->>pipeline: Run(ctx, dir, opts)
+
+    pipeline->>scanner: Discover(dir, repoURL, scanners)
+    scanner-->>pipeline: []Dependency (N packages)
+
+    pipeline->>resolver: Enrich(ctx, deps)
+    note over resolver: spawns up to Concurrency goroutines
+    par concurrent registry lookups
+        resolver->>npm: GET /{package}
+        npm-->>resolver: {dist-tags, versions, peerDependencies}
+        resolver->>goproxy: GET /{module}/@latest + @v/list
+        goproxy-->>resolver: version info
+    end
+    resolver->>osv: POST /v1/querybatch (all deps)
+    osv-->>resolver: [{vulns:[…]}, …]
+    resolver-->>pipeline: []EnrichedDependency
+
+    pipeline->>scorer: Score(enriched, crossRepoCounts)
+    pipeline->>scorer: DetectConflicts(scored)
+    scorer-->>pipeline: []ScoredDependency (sorted desc, with cascade/blocked flags)
 
     loop for each ScoredDependency
-        cmd->>advisor: Advise(ctx, dep)
-        advisor-->>cmd: AdvisoryReport
+        pipeline->>advisor: Advise(ctx, dep)
+        advisor-->>pipeline: AdvisoryReport
     end
 
-    cmd->>User: colour-coded table + migration hints
+    pipeline-->>entry: []AdvisoryReport
+
+    alt CLI
+        entry->>User: colour-coded table + cascade/blocked sections
+    else Server
+        entry->>entry: store.SaveDeps(runID, reports)
+        entry->>User: JSON via GET /api/scans/{id}
+    end
+
+    opt GitURL was used
+        entry->>git: os.RemoveAll(tempDir)
+    end
 ```
 
 ---
 
 ## 3. Data model
 
-Each pipeline stage produces a richer struct by embedding the previous one. This keeps the type system honest — you can never pass a `ScoredDependency` where a raw `Dependency` is expected, but you can always access the raw fields through the embedding chain.
+Each pipeline stage produces a richer struct by embedding the previous one. All structs carry JSON tags for API serialisation and `--json` output.
 
 ```mermaid
 classDiagram
@@ -126,12 +163,15 @@ classDiagram
         +string SeverityGap
         +int VersionsBehind
         +[]Vulnerability Vulnerabilities
+        +map[string]string PeerConstraints
     }
 
     class ScoredDependency {
         +float64 RiskScore
         +int CrossRepoCount
         +[]string Reasons
+        +[]string BlockedBy
+        +string CascadeGroup
     }
 
     class AdvisoryReport {
@@ -149,7 +189,7 @@ classDiagram
 
 **Embedding chain:** `Dependency` → `EnrichedDependency` → `ScoredDependency` → `AdvisoryReport`
 
-Every struct exposes all fields of its ancestors via Go struct embedding. Callers that only need version data work with `EnrichedDependency`; the full `AdvisoryReport` is only materialised at the very end.
+`PeerConstraints` is populated for npm packages and maps peer package names to the semver constraint declared by the package's *latest* version (e.g. `{"react": "^19.0.0"}`). It drives conflict detection in the scorer.
 
 ---
 
@@ -173,7 +213,6 @@ classDiagram
     }
 
     class GoModScanner {
-        <<planned>>
         +Name() string
         +Matches(path string) bool
         +Parse(path, repoURL string) []Dependency
@@ -197,7 +236,7 @@ classDiagram
 flowchart TD
     A([Start: Discover dir]) --> B{filepath.Walk entry}
     B --> C{Is directory?}
-    C -- yes --> D{Skipped name?\nnode_modules .git vendor}
+    C -- yes --> D{Skipped name?\nnode_modules .git vendor\n.venv __pycache__}
     D -- yes --> E[filepath.SkipDir]
     D -- no --> B
     C -- no --> F{Scanner.Matches path?}
@@ -213,7 +252,7 @@ flowchart TD
 
 ### Version string normalisation
 
-Range operators are stripped from version specifiers before any semver comparison occurs. The logic lives in `cleanVersion()`.
+Range operators are stripped before any semver comparison. The logic lives in `cleanVersion()`.
 
 ```mermaid
 flowchart LR
@@ -242,8 +281,8 @@ flowchart TD
     subgraph goroutines ["goroutines (up to Concurrency run at once)"]
         direction LR
         G1["goroutine 1\nresolveNPM(dep[0])"]
-        G2["goroutine 2\nresolveNPM(dep[1])"]
-        GN["goroutine N\nresolveNPM(dep[N])"]
+        G2["goroutine 2\nresolveGoProxy(dep[1])"]
+        GN["goroutine N\nresolveOne(dep[N])"]
     end
 
     C --> goroutines
@@ -254,7 +293,7 @@ flowchart TD
 
 **Why two phases?**
 
-- Registry lookups (npm, PyPI, etc.) are independent per package and benefit maximally from parallelism. A semaphore cap (`defaultConcurrency = 10`) prevents connection exhaustion.
+- Registry lookups (npm, Go proxy) are independent per package and benefit maximally from parallelism. A semaphore cap (`defaultConcurrency = 10`) prevents connection exhaustion.
 - OSV.dev accepts a batch request — sending all packages in one POST is cheaper than N individual calls and avoids hitting rate limits.
 
 ### Semaphore pattern
@@ -272,11 +311,20 @@ sequenceDiagram
     g->>sem: ←sem (release slot)
 ```
 
+### Supported ecosystems
+
+| Ecosystem | Registry | Latest version | Versions-behind |
+|---|---|---|---|
+| `npm` | `registry.npmjs.org/{pkg}` | `dist-tags.latest` | Count of versions between current and latest |
+| `go` | `proxy.golang.org/{module}/@latest` + `@v/list` | `.Version` field | Count of listed versions newer than current |
+
 ---
 
-## 6. Scorer package — risk formula
+## 6. Scorer package — risk formula and conflict detection
 
-Each dependency is scored across four independent signals. Scores are normalised to 0–1 per factor, then combined using fixed weights.
+### Risk formula
+
+Each dependency is scored across four independent signals.
 
 ```mermaid
 flowchart LR
@@ -303,17 +351,41 @@ flowchart LR
     SUM --> score(["RiskScore 0–100"])
 ```
 
-### Score band interpretation
-
 | Score | Band | Colour | Typical profile |
 |---|---|---|---|
 | 70–100 | Critical | Red / bold | CRITICAL or HIGH CVE present |
 | 40–69 | Elevated | Yellow | Major version lag or HIGH CVE |
 | 0–39 | Low | Green | Patch/minor lag, no CVEs |
 
-### Sorting
+### Conflict detection — `DetectConflicts`
 
-`scorer.Score()` returns `[]ScoredDependency` sorted descending by `RiskScore`. The table always shows the highest-risk package first regardless of the order dependencies appear in the manifest.
+A second pass over scored dependencies checks `PeerConstraints` (populated from npm registry metadata) against currently installed peer versions.
+
+```mermaid
+flowchart TD
+    A([scored deps]) --> B[Index deps by name]
+    B --> C[For each dep with PeerConstraints]
+    C --> D{Peer installed\nin this repo?}
+    D -- no --> C
+    D -- yes --> E{Current peer version\nsatisfies constraint?}
+    E -- yes → no conflict --> C
+    E -- no --> F{Does peer's\nlatest satisfy?}
+    F -- yes --> G[union-find: union dep + peer\n→ CascadeGroup]
+    F -- no --> H[dep.BlockedBy append peer]
+    G & H --> C
+    C --> I[Build connected components\nfrom union-find]
+    I --> J[Write sorted member names\nas CascadeGroup string]
+    J --> K([Return scored deps with\nBlockedBy + CascadeGroup set])
+```
+
+**Union-Find determinism:** the lexicographically smaller package name always becomes the root, so the cascade group ID (e.g. `"next+react"`) is identical regardless of traversal order.
+
+**Two outcomes per conflict:**
+
+| Outcome | Condition | Field set |
+|---|---|---|
+| `CascadeGroup` | Peer's *latest* satisfies the constraint — both can upgrade together | `CascadeGroup = "pkg-a+pkg-b"` on both members |
+| `BlockedBy` | Even the peer's *latest* doesn't satisfy — no safe path exists yet | `BlockedBy = ["peer-name"]` on the blocked dep |
 
 ---
 
@@ -341,7 +413,7 @@ classDiagram
     Advisor <|.. AnthropicAdvisor : implements
 ```
 
-### Selection logic in `cmd/scan.go`
+### Selection logic
 
 ```mermaid
 flowchart LR
@@ -352,28 +424,165 @@ flowchart LR
     D --> E["Advise(ctx, dep) → AdvisoryReport"]
 ```
 
-### Stub output
-
 The stub generates deterministic guidance from metadata alone — no network calls:
 
 - **Summary** — `"Upgrade {name} from {current} to {latest}. Risk score: {n}/100."`
 - **BreakingChanges** — populated only for major-version gaps
 - **MigrationSteps** — ecosystem-appropriate shell commands (`npm install`, `go get`, `pip install --upgrade`)
 
-### AnthropicAdvisor (planned)
+---
 
-When implemented, `AnthropicAdvisor.Advise` will:
+## 8. Pipeline package
 
-1. Build a prompt including the package name, version delta, CVE summaries, and changelog URL
-2. Call `POST /v1/messages` with `claude-sonnet-4-6` (or configurable model)
-3. Parse the response into `Summary`, `BreakingChanges`, and `MigrationSteps`
-4. Return the populated `AdvisoryReport`
+`pipeline.Run()` is the single entry point for the full scan sequence. Both the CLI and the HTTP server call it, avoiding any duplication of orchestration logic.
 
-Wire it up using the `/claude-api` skill or the `github.com/anthropics/anthropic-sdk-go` package.
+```mermaid
+flowchart TD
+    A([pipeline.Run called]) --> B{GitURL set?}
+    B -- yes --> C["git clone --depth 1 → tempDir\ninject GITHUB_TOKEN if HTTPS"]
+    C --> D[dir = tempDir]
+    B -- no --> D
+    D --> E[scanner.Discover]
+    E --> F{0 deps found?}
+    F -- yes --> G([return nil, nil])
+    F -- no --> H[resolver.Enrich]
+    H --> I[scorer.Score]
+    I --> J[scorer.DetectConflicts]
+    J --> K[advisor.Advise loop]
+    K --> L([return []AdvisoryReport])
+    L --> M{GitURL was set?}
+    M -- yes --> N[os.RemoveAll tempDir]
+    M -- no --> O([done])
+    N --> O
+```
+
+`Options.OnProgress` is a `func(string)` callback the caller can use to stream status lines. The CLI prints them to stderr with `→` prefix; the server passes `nil` (silently ignored).
 
 ---
 
-## 8. External API contracts
+## 9. Store package — SQLite persistence
+
+`store.New(path)` opens (or creates) a SQLite database using `modernc.org/sqlite` (pure Go, no CGo required). WAL mode is enabled for concurrent read performance.
+
+### Schema
+
+```mermaid
+erDiagram
+    scan_runs {
+        int     id          PK
+        text    dir
+        text    repo_url
+        text    status      "pending | running | done | failed"
+        text    started_at
+        text    finished_at
+        text    error
+    }
+
+    scan_deps {
+        int     id              PK
+        int     run_id          FK
+        text    name
+        text    ecosystem
+        text    manifest_path
+        text    current_ver
+        text    latest_ver
+        text    severity_gap
+        int     versions_behind
+        real    risk_score
+        text    cascade_group
+        text    blocked_by      "JSON array"
+        text    peer_constraints "JSON object"
+        text    vulnerabilities  "JSON array"
+        text    reasons          "JSON array"
+        text    summary
+        text    breaking_changes "JSON array"
+        text    migration_steps  "JSON array"
+    }
+
+    scan_runs ||--o{ scan_deps : "has"
+```
+
+Array and object fields are stored as JSON strings and unmarshalled on read.
+
+### Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant server as server.triggerScan
+    participant store as store.Store
+    participant pipeline as pipeline.Run
+
+    server->>store: CreateScanRun(dir, repoURL) → runID
+    server->>pipeline: Run(ctx, dir, opts) [goroutine]
+    pipeline-->>server: reports, err
+    server->>store: FinishScanRun(runID, err)
+    alt no error
+        server->>store: SaveDeps(runID, reports)
+    end
+```
+
+On startup, `RecoverStuckScans()` marks any runs still in `running` or `pending` state as `failed` — guarding against crash-interrupted scans leaving stale rows.
+
+---
+
+## 10. Server and dashboard
+
+### HTTP routes
+
+| Method | Path | Handler |
+|---|---|---|
+| `GET` | `/api/scans` | `listScans` — returns `[]store.ScanRun` |
+| `GET` | `/api/scans/{id}` | `getScan` — returns `{run, deps}` |
+| `POST` | `/api/scans` | `triggerScan` — 202 Accepted, scan runs in goroutine |
+| `*` | `/*` | `spaHandler` — serves embedded React app, falls back to `index.html` |
+
+### SPA fallback
+
+```mermaid
+flowchart LR
+    req([HTTP request]) --> A{Path matches\nembedded file?}
+    A -- yes --> B[http.FileServer\nserve file]
+    A -- no --> C[serve dist/index.html\nReact Router takes over]
+```
+
+### Frontend architecture
+
+The dashboard is a Vite + React 18 SPA embedded into the Go binary via `//go:embed dist`.
+
+```
+frontend/src/
+├── main.jsx          ← ReactDOM root, BrowserRouter
+├── App.jsx           ← Routes: / and /scans/:id
+├── api.js            ← fetch wrappers for all API endpoints
+├── index.css         ← dark-theme design system (CSS variables)
+├── pages/
+│   ├── ScanList.jsx  ← trigger form (local/remote toggle), scan history table
+│   └── ScanDetail.jsx ← run metadata, deps table, migration hints
+└── components/
+    ├── RiskBadge.jsx    ← colour-coded score chip
+    ├── StatusBadge.jsx  ← run status chip
+    ├── DepsTable.jsx    ← sortable dependency table
+    ├── CascadePanel.jsx ← cascade group visualisation
+    └── BlockedPanel.jsx ← blocked upgrade warnings
+```
+
+`ScanList` and `ScanDetail` both poll the API every 2–3 seconds while a scan is in `running` state, updating automatically when it completes.
+
+### Build and embed flow
+
+```mermaid
+flowchart LR
+    A[frontend/src/**] --> B["npm run build\n(Vite)"]
+    B --> C[web/dist/]
+    C --> D["go build\n(//go:embed dist)"]
+    D --> E[dep-health binary\n— frontend included]
+```
+
+The `.gitignore` excludes `web/dist/*` (except `.gitkeep`) so the compiled assets are never committed — consumers build the frontend themselves.
+
+---
+
+## 11. External API contracts
 
 ### npm Registry
 
@@ -381,8 +590,18 @@ Wire it up using the `/claude-api` skill or the `github.com/anthropics/anthropic
 |---|---|
 | **Endpoint** | `GET https://registry.npmjs.org/{package}` |
 | **Auth** | None required for public packages |
-| **Used fields** | `dist-tags.latest` (latest stable version), `versions` map (all published versions for counting) |
+| **Used fields** | `dist-tags.latest`, `versions` map (for counting + peer constraints) |
+| **Peer constraints** | `versions[latest].peerDependencies` → `map[string]string` |
 | **Rate limit** | Informal; 10-connection semaphore keeps dep-health well within normal bounds |
+
+### Go Module Proxy
+
+| | |
+|---|---|
+| **Latest endpoint** | `GET https://proxy.golang.org/{escaped-module}/@latest` |
+| **List endpoint** | `GET https://proxy.golang.org/{escaped-module}/@v/list` |
+| **Auth** | None for public modules |
+| **Module escaping** | `golang.org/x/mod/module.EscapePath` (capital letters → `!lower`) |
 
 ### OSV.dev Batch API
 
@@ -391,58 +610,39 @@ Wire it up using the `/claude-api` skill or the `github.com/anthropics/anthropic
 | **Endpoint** | `POST https://api.osv.dev/v1/querybatch` |
 | **Auth** | None |
 | **Request** | `{"queries":[{"package":{"name":"lodash","ecosystem":"npm"},"version":"4.17.11"},…]}` |
-| **Response** | `{"results":[{"vulns":[{"id":"GHSA-…","summary":"…","database_specific":{"severity":"HIGH"},…}]}]}` |
-| **Alignment** | `results[i]` corresponds exactly to `queries[i]` — index alignment is preserved |
+| **Response** | `{"results":[{"vulns":[{"id":"GHSA-…","summary":"…","database_specific":{"severity":"HIGH"}}]}]}` |
+| **Alignment** | `results[i]` corresponds exactly to `queries[i]` |
 | **Severity source** | Prefer `database_specific.severity`; fall back to `severity[0].score` (CVSS string) |
 
 ---
 
-## 9. Extension guide
+## 12. Extension guide
 
 ### Adding a new ecosystem scanner
 
-1. Create a file in `scanner/`, e.g. `scanner/gomod.go`
-2. Implement the three `Scanner` interface methods
-3. Register it in `DefaultScanners()`
+1. Create `scanner/yourscanner.go`
+2. Implement the `Scanner` interface
+3. Add it to `DefaultScanners()`
 
 ```go
-// scanner/gomod.go
-package scanner
+// scanner/requirements.go
+type RequirementsTxtScanner struct{}
 
-import "dep-health/models"
-
-type GoModScanner struct{}
-
-func (s *GoModScanner) Name() string               { return "go/go.mod" }
-func (s *GoModScanner) Matches(path string) bool   { return filepath.Base(path) == "go.mod" }
-func (s *GoModScanner) Parse(path, repoURL string) ([]models.Dependency, error) {
-    // parse go.mod, return []models.Dependency with Ecosystem: "go"
+func (s *RequirementsTxtScanner) Name() string               { return "python/requirements.txt" }
+func (s *RequirementsTxtScanner) Matches(path string) bool   { return filepath.Base(path) == "requirements.txt" }
+func (s *RequirementsTxtScanner) Parse(path, repoURL string) ([]models.Dependency, error) {
+    // parse requirements.txt, return deps with Ecosystem: "pypi"
 }
 ```
 
-```go
-// scanner/scanner.go — DefaultScanners
-func DefaultScanners() []Scanner {
-    return []Scanner{
-        &PackageJSONScanner{},
-        &GoModScanner{},         // add here
-    }
-}
-```
-
-The resolver, scorer, and advisor pipeline picks it up automatically. You may also need to add a registry lookup branch in `resolver.resolveOne()` for the new ecosystem.
-
-### Adding a new registry lookup
-
-In `resolver/resolver.go`, extend `resolveOne()`:
+Then add a registry lookup branch in `resolver/resolver.go`:
 
 ```go
 func (r *Resolver) resolveOne(ctx context.Context, dep models.Dependency) (models.EnrichedDependency, error) {
     switch dep.Ecosystem {
-    case "npm":
-        return r.resolveNPM(ctx, dep)
-    case "go":
-        return r.resolveGoProxy(ctx, dep)   // add your implementation
+    case "npm":   return r.resolveNPM(ctx, dep)
+    case "go":    return r.resolveGoProxy(ctx, dep)
+    case "pypi":  return r.resolvePyPI(ctx, dep)   // add your implementation
     default:
         return models.EnrichedDependency{Dependency: dep}, nil
     }

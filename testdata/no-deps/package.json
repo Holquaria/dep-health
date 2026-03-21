@@ -1,0 +1,5 @@
+{
+  "name": "dep-health-test-no-deps",
+  "version": "1.0.0",
+  "description": "Fixture: project with no external dependencies — scanner should return empty result gracefully"
+}

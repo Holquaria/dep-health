@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	npmRegistryBase = "https://registry.npmjs.org"
-	osvBatchURL     = "https://api.osv.dev/v1/querybatch"
+	npmRegistryBase  = "https://registry.npmjs.org"
+	pypiRegistryBase = "https://pypi.org/pypi"
+	osvBatchURL      = "https://api.osv.dev/v1/querybatch"
 
 	defaultConcurrency = 10
 )
@@ -38,6 +39,10 @@ type Resolver struct {
 	// the default (https://registry.npmjs.org).  Set in tests to point at a
 	// local httptest.Server.
 	NPMRegistryURL string
+	// PyPIRegistryURL overrides the PyPI registry base URL.  Leave empty to use
+	// the default (https://pypi.org/pypi).  Set in tests to point at a local
+	// httptest.Server.
+	PyPIRegistryURL string
 	// OSVBatchURL overrides the OSV.dev batch endpoint.  Leave empty to use
 	// the default.  Set in tests to point at a local httptest.Server.
 	OSVBatchURL string
@@ -57,6 +62,14 @@ func (r *Resolver) npmBase() string {
 		return r.NPMRegistryURL
 	}
 	return npmRegistryBase
+}
+
+// pypiBase returns the PyPI registry base URL, falling back to the package constant.
+func (r *Resolver) pypiBase() string {
+	if r.PyPIRegistryURL != "" {
+		return r.PyPIRegistryURL
+	}
+	return pypiRegistryBase
 }
 
 // osvEndpoint returns the OSV batch URL, falling back to the package constant.
@@ -119,6 +132,8 @@ func (r *Resolver) resolveOne(ctx context.Context, dep models.Dependency) (model
 		return r.resolveNPM(ctx, dep)
 	case "go":
 		return r.resolveGoProxy(ctx, dep)
+	case "pypi":
+		return r.resolvePyPI(ctx, dep)
 	default:
 		// Return the raw dep unchanged; other ecosystems are not yet implemented.
 		return models.EnrichedDependency{Dependency: dep}, nil
@@ -387,6 +402,92 @@ func countVersionsBehindList(current, latest string, versions []string) int {
 	for _, v := range versions {
 		sv, err := semver.NewVersion(v)
 		if err != nil {
+			continue
+		}
+		if sv.GreaterThan(cur) && (sv.LessThan(lat) || sv.Equal(lat)) {
+			count++
+		}
+	}
+	return count
+}
+
+// ── PyPI registry ─────────────────────────────────────────────────────────────
+
+// pypiInfo is the subset of the PyPI JSON API response we need.
+type pypiInfo struct {
+	Info struct {
+		Version string `json:"version"`
+	} `json:"info"`
+	Releases map[string]json.RawMessage `json:"releases"`
+}
+
+// resolvePyPI fetches the latest version for a Python package from pypi.org.
+func (r *Resolver) resolvePyPI(ctx context.Context, dep models.Dependency) (models.EnrichedDependency, error) {
+	url := fmt.Sprintf("%s/%s/json", r.pypiBase(), dep.Name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return models.EnrichedDependency{Dependency: dep}, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := r.HTTPClient.Do(req)
+	if err != nil {
+		return models.EnrichedDependency{Dependency: dep}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return models.EnrichedDependency{Dependency: dep},
+			fmt.Errorf("package %q not found on PyPI", dep.Name)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return models.EnrichedDependency{Dependency: dep},
+			fmt.Errorf("PyPI returned HTTP %d for %s", resp.StatusCode, dep.Name)
+	}
+
+	var info pypiInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return models.EnrichedDependency{Dependency: dep}, err
+	}
+
+	latest := info.Info.Version
+	if latest == "" {
+		return models.EnrichedDependency{Dependency: dep},
+			fmt.Errorf("no version found in PyPI response for %s", dep.Name)
+	}
+
+	gap := computeSeverityGap(dep.CurrentVersion, latest)
+	behind := countVersionsBehindPyPI(dep.CurrentVersion, latest, info.Releases)
+
+	return models.EnrichedDependency{
+		Dependency:     dep,
+		LatestVersion:  latest,
+		SeverityGap:    gap,
+		VersionsBehind: behind,
+	}, nil
+}
+
+// countVersionsBehindPyPI counts published versions in (current, latest] from
+// the PyPI releases map.  Pre-release versions (alpha, beta, rc) are excluded.
+func countVersionsBehindPyPI(current, latest string, releases map[string]json.RawMessage) int {
+	cur, err := semver.NewVersion(current)
+	if err != nil {
+		return 0
+	}
+	lat, err := semver.NewVersion(latest)
+	if err != nil {
+		return 0
+	}
+	if !cur.LessThan(lat) {
+		return 0
+	}
+	count := 0
+	for v := range releases {
+		sv, err := semver.NewVersion(v)
+		if err != nil {
+			continue
+		}
+		if sv.Prerelease() != "" {
 			continue
 		}
 		if sv.GreaterThan(cur) && (sv.LessThan(lat) || sv.Equal(lat)) {

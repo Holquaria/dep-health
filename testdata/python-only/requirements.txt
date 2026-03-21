@@ -1,0 +1,20 @@
+# Fixture: python-only project with intentionally old dependencies
+
+# Web framework
+Flask==1.1.4
+Werkzeug==1.0.1
+
+# HTTP
+requests==2.25.1
+urllib3==1.26.5
+
+# Data
+numpy==1.21.0
+pandas==1.3.0
+SQLAlchemy==1.3.23
+
+# Task queue
+celery==4.4.7
+
+# Testing
+pytest==6.2.5

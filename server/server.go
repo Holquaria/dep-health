@@ -75,18 +75,33 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request) {
 }
 
 type triggerRequest struct {
-	Dir     string `json:"dir"`
-	RepoURL string `json:"repo_url"`
+	Dir     string `json:"dir"`      // absolute local path (mutually exclusive with GitURL)
+	GitURL  string `json:"git_url"`  // remote git URL to clone and scan
+	RepoURL string `json:"repo_url"` // informational URL stored against the run
 }
 
 func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 	var req triggerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Dir == "" {
-		jsonError(w, fmt.Errorf("body must include non-empty dir"), http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, fmt.Errorf("invalid request body"), http.StatusBadRequest)
+		return
+	}
+	if req.Dir == "" && req.GitURL == "" {
+		jsonError(w, fmt.Errorf("body must include dir or git_url"), http.StatusBadRequest)
 		return
 	}
 
-	runID, err := s.store.CreateScanRun(req.Dir, req.RepoURL)
+	// For remote scans, store the git URL as the repo URL when not explicitly set.
+	if req.RepoURL == "" && req.GitURL != "" {
+		req.RepoURL = req.GitURL
+	}
+
+	scanDir := req.Dir
+	if scanDir == "" {
+		scanDir = req.GitURL // placeholder; pipeline.Run will clone it
+	}
+
+	runID, err := s.store.CreateScanRun(scanDir, req.RepoURL)
 	if err != nil {
 		jsonError(w, err, http.StatusInternalServerError)
 		return
@@ -107,6 +122,7 @@ func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 
 		reports, scanErr := pipeline.Run(ctx, req.Dir, pipeline.Options{
 			RepoURL: req.RepoURL,
+			GitURL:  req.GitURL,
 		})
 		if err := s.store.FinishScanRun(runID, scanErr); err != nil {
 			return

@@ -7,7 +7,11 @@ export default function ScanList() {
   const [scans, setScans] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+
+  // form state
+  const [mode, setMode] = useState('local') // 'local' | 'remote'
   const [dir, setDir] = useState('')
+  const [gitUrl, setGitUrl] = useState('')
   const [repoUrl, setRepoUrl] = useState('')
   const [triggering, setTriggering] = useState(false)
 
@@ -24,7 +28,6 @@ export default function ScanList() {
 
   useEffect(() => {
     load()
-    // Poll every 3s while any scan is running.
     const id = setInterval(() => {
       setScans(prev => {
         if (prev.some(s => s.status === 'running' || s.status === 'pending')) {
@@ -38,11 +41,16 @@ export default function ScanList() {
 
   async function handleTrigger(e) {
     e.preventDefault()
-    if (!dir.trim()) return
     setTriggering(true)
+    setError(null)
     try {
-      await triggerScan(dir.trim(), repoUrl.trim())
+      await triggerScan(
+        mode === 'local' ? dir.trim() : '',
+        mode === 'remote' ? gitUrl.trim() : '',
+        repoUrl.trim(),
+      )
       setDir('')
+      setGitUrl('')
       setRepoUrl('')
       await load()
     } catch (e) {
@@ -60,21 +68,53 @@ export default function ScanList() {
 
       {/* Trigger form */}
       <div className="card">
-        <div className="card-title">New Scan</div>
+        <div className="flex items-center gap-8 mb-8">
+          <div className="card-title" style={{ marginBottom: 0 }}>New Scan</div>
+          <div className="flex gap-8" style={{ marginLeft: 'auto' }}>
+            <button
+              type="button"
+              className={`btn ${mode === 'local' ? 'btn-primary' : ''}`}
+              onClick={() => setMode('local')}
+            >
+              Local path
+            </button>
+            <button
+              type="button"
+              className={`btn ${mode === 'remote' ? 'btn-primary' : ''}`}
+              onClick={() => setMode('remote')}
+            >
+              Git URL
+            </button>
+          </div>
+        </div>
+
         <form onSubmit={handleTrigger}>
           <div className="form-row">
-            <div className="form-field">
-              <label className="form-label">Directory (absolute path)</label>
-              <input
-                className="input"
-                value={dir}
-                onChange={e => setDir(e.target.value)}
-                placeholder="/path/to/repo"
-                required
-              />
-            </div>
-            <div className="form-field">
-              <label className="form-label">Repo URL (optional)</label>
+            {mode === 'local' ? (
+              <div className="form-field">
+                <label className="form-label">Directory (absolute path)</label>
+                <input
+                  className="input"
+                  value={dir}
+                  onChange={e => setDir(e.target.value)}
+                  placeholder="/Users/you/your-project"
+                  required
+                />
+              </div>
+            ) : (
+              <div className="form-field">
+                <label className="form-label">Git URL</label>
+                <input
+                  className="input"
+                  value={gitUrl}
+                  onChange={e => setGitUrl(e.target.value)}
+                  placeholder="https://github.com/org/repo"
+                  required
+                />
+              </div>
+            )}
+            <div className="form-field" style={{ maxWidth: 280 }}>
+              <label className="form-label">Repo URL override (optional)</label>
               <input
                 className="input"
                 value={repoUrl}
@@ -86,10 +126,15 @@ export default function ScanList() {
               {triggering ? 'Starting…' : 'Run Scan'}
             </button>
           </div>
+          {mode === 'remote' && (
+            <p className="text-muted" style={{ fontSize: 12, marginTop: -8 }}>
+              The server will run <code>git clone --depth 1</code>. For private repos set <code>GITHUB_TOKEN</code> on the server.
+            </p>
+          )}
         </form>
       </div>
 
-      {error && <p className="text-red">{error}</p>}
+      {error && <p className="text-red" style={{ marginBottom: 12 }}>{error}</p>}
 
       {loading ? (
         <p className="text-muted">Loading…</p>
@@ -101,7 +146,7 @@ export default function ScanList() {
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Directory</th>
+                <th>Target</th>
                 <th>Status</th>
                 <th>Started</th>
                 <th>Duration</th>
@@ -117,7 +162,12 @@ export default function ScanList() {
                 return (
                   <tr key={s.id}>
                     <td><Link to={`/scans/${s.id}`}>#{s.id}</Link></td>
-                    <td className="monospace">{s.dir}</td>
+                    <td className="monospace">
+                      {s.repo_url
+                        ? <a href={s.repo_url} target="_blank" rel="noreferrer">{s.dir}</a>
+                        : s.dir
+                      }
+                    </td>
                     <td><StatusBadge status={s.status} /></td>
                     <td className="text-muted">{started.toLocaleString()}</td>
                     <td className="text-muted">{duration}</td>

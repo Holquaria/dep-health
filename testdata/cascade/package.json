@@ -1,0 +1,15 @@
+{
+  "name": "dep-health-test-cascade",
+  "version": "1.0.0",
+  "description": "Fixture: engineered to trigger cascade group detection.\n\nreact-dom@18 declares peerDependencies: { react: '^18' }, so react + react-dom\nmust be upgraded together — the scorer will assign them the same cascade group.\n@testing-library/react@14 similarly requires react@^18, pulling it into the same group.\nreact-router-dom@6 requires react@>=16.8 so it may or may not join depending on\nwhether the constraint is satisfiable at the pinned version.",
+  "dependencies": {
+    "react": "16.14.0",
+    "react-dom": "16.14.0",
+    "react-router-dom": "5.3.4",
+    "@testing-library/react": "11.2.7",
+    "@testing-library/jest-dom": "5.16.5"
+  },
+  "devDependencies": {
+    "jest": "26.6.3"
+  }
+}

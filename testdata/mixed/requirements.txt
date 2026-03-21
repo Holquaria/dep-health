@@ -1,0 +1,4 @@
+# Python side of the mixed fixture
+Flask==1.1.4
+requests==2.25.1
+gunicorn==20.0.4

@@ -15,18 +15,24 @@ import (
 )
 
 var scanCmd = &cobra.Command{
-	Use:   "scan <directory>",
-	Short: "Scan a local directory for outdated and vulnerable dependencies",
-	Long: `scan walks the given directory for supported manifest files (package.json,
-go.mod, requirements.txt — more to come), resolves each dependency against
-its ecosystem registry, queries OSV.dev for known CVEs, and prints a
-risk-scored table sorted from highest to lowest risk.`,
-	Args: cobra.ExactArgs(1),
+	Use:   "scan [directory]",
+	Short: "Scan a directory or remote repository for outdated and vulnerable dependencies",
+	Long: `scan walks a local directory (or clones a remote git repository) for
+supported manifest files (package.json, go.mod — more to come), resolves
+each dependency against its ecosystem registry, queries OSV.dev for known
+CVEs, and prints a risk-scored table sorted from highest to lowest risk.
+
+Examples:
+  dep-health scan ./my-project
+  dep-health scan --git-url https://github.com/org/repo
+  dep-health scan --git-url git@github.com:org/repo.git`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runScan,
 }
 
 var (
 	flagRepoURL  string
+	flagGitURL   string
 	flagTopN     int
 	flagMinScore float64
 	flagJSON     bool
@@ -34,19 +40,28 @@ var (
 
 func init() {
 	scanCmd.Flags().StringVar(&flagRepoURL, "repo", "", "Repository URL attached to discovered dependencies (informational)")
+	scanCmd.Flags().StringVar(&flagGitURL, "git-url", "", "Remote git repository to clone and scan (HTTPS or SSH)")
 	scanCmd.Flags().IntVar(&flagTopN, "top", 0, "Limit output to the N highest-risk dependencies (0 = all)")
 	scanCmd.Flags().Float64Var(&flagMinScore, "min-score", 0, "Exclude dependencies with a risk score below this threshold (0–100)")
 	scanCmd.Flags().BoolVar(&flagJSON, "json", false, "Emit results as JSON instead of a table")
 }
 
 func runScan(cmd *cobra.Command, args []string) error {
-	dir := args[0]
-	ctx := context.Background()
+	if flagGitURL == "" && len(args) == 0 {
+		return fmt.Errorf("provide a directory argument or --git-url")
+	}
 
+	dir := ""
+	if len(args) > 0 {
+		dir = args[0]
+	}
+
+	ctx := context.Background()
 	step := func(msg string) { fmt.Fprintf(os.Stderr, "→ %s\n", msg) }
 
 	reports, err := pipeline.Run(ctx, dir, pipeline.Options{
 		RepoURL:    flagRepoURL,
+		GitURL:     flagGitURL,
 		OnProgress: step,
 	})
 	if err != nil {

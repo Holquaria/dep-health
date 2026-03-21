@@ -32,6 +32,7 @@ func DefaultScanners() []Scanner {
 	return []Scanner{
 		&PackageJSONScanner{},
 		&GoModScanner{},
+		&RequirementsTxtScanner{},
 	}
 }
 

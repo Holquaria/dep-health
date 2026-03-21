@@ -1,5 +1,6 @@
 import React from 'react'
 import RiskBadge from './RiskBadge.jsx'
+import { cascadeColor } from './cascadeColor.js'
 
 export default function DepsTable({ deps }) {
   if (!deps || deps.length === 0) {
@@ -11,6 +12,7 @@ export default function DepsTable({ deps }) {
       <table>
         <thead>
           <tr>
+            <th style={{ width: 3, padding: 0 }} />
             <th>#</th>
             <th>Package</th>
             <th>Current</th>
@@ -27,16 +29,27 @@ export default function DepsTable({ deps }) {
           {deps.map((d, i) => {
             const cveCount = d.vulnerabilities?.length ?? 0
             const severity = cveCount > 0 ? d.vulnerabilities[0].severity : null
-            const flags = d.blocked_by?.length > 0
-              ? 'BLOCKED'
-              : d.cascade_group
-                ? 'CASCADE'
-                : ''
-            const flagClass = flags === 'BLOCKED' ? 'text-red' : flags === 'CASCADE' ? 'text-yellow' : ''
+            const isBlocked = d.blocked_by?.length > 0
+            const isCascade = !!d.cascade_group
+            const color = isCascade ? cascadeColor(d.cascade_group) : null
+
             return (
               <tr key={`${d.name}-${i}`}>
+                {/* Colored left-edge stripe — same color for all members of a cascade group */}
+                <td
+                  style={{
+                    width: 3,
+                    padding: 0,
+                    background: color ?? 'transparent',
+                    borderBottom: 'none',
+                  }}
+                />
                 <td className="text-muted">{i + 1}</td>
-                <td><strong>{d.name}</strong><br /><span className="text-muted monospace">{d.ecosystem}</span></td>
+                <td>
+                  <strong>{d.name}</strong>
+                  <br />
+                  <span className="text-muted monospace">{d.ecosystem}</span>
+                </td>
                 <td className="monospace">{d.current_version || '—'}</td>
                 <td className="monospace">{d.latest_version || '—'}</td>
                 <td>{d.severity_gap || (d.latest_version ? '—' : 'n/a')}</td>
@@ -48,7 +61,22 @@ export default function DepsTable({ deps }) {
                   }
                 </td>
                 <td><RiskBadge score={d.risk_score} /></td>
-                <td className={flagClass}>{flags || '—'}</td>
+                <td>
+                  {isBlocked ? (
+                    <span className="badge badge-high">BLOCKED</span>
+                  ) : isCascade ? (
+                    <span
+                      className="badge"
+                      style={{
+                        background: `${color}22`,
+                        color,
+                        border: `1px solid ${color}55`,
+                      }}
+                    >
+                      CASCADE
+                    </span>
+                  ) : '—'}
+                </td>
                 <td className="text-muted">{d.reasons?.[0] ?? '—'}</td>
               </tr>
             )
