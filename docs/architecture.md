@@ -206,29 +206,31 @@ classDiagram
         +Parse(path, repoURL string) []Dependency
     }
 
-    class PackageJSONScanner {
-        +Name() string
-        +Matches(path string) bool
-        +Parse(path, repoURL string) []Dependency
-    }
-
-    class GoModScanner {
-        +Name() string
-        +Matches(path string) bool
-        +Parse(path, repoURL string) []Dependency
-    }
-
-    class RequirementsTxtScanner {
-        <<planned>>
-        +Name() string
-        +Matches(path string) bool
-        +Parse(path, repoURL string) []Dependency
-    }
+    class PackageJSONScanner { }
+    class GoModScanner { }
+    class RequirementsTxtScanner { }
+    class PyprojectScanner { }
+    class SetupCfgScanner { }
+    class PomScanner { }
 
     Scanner <|.. PackageJSONScanner : implements
     Scanner <|.. GoModScanner : implements
     Scanner <|.. RequirementsTxtScanner : implements
+    Scanner <|.. PyprojectScanner : implements
+    Scanner <|.. SetupCfgScanner : implements
+    Scanner <|.. PomScanner : implements
 ```
+
+### Registered scanners
+
+| Scanner | File(s) matched | Ecosystem | Notes |
+|---|---|---|---|
+| `PackageJSONScanner` | `package.json` | `npm` | `dependencies` + `devDependencies`, range operators stripped |
+| `GoModScanner` | `go.mod` | `go` | direct + indirect; local `replace` directives excluded |
+| `RequirementsTxtScanner` | `requirements.txt`, `requirements-*.txt` | `pypi` | `==`, `>=`, `~=`; extras and env markers stripped |
+| `PyprojectScanner` | `pyproject.toml` | `pypi` | PEP 621 `[project] dependencies` + `optional-dependencies`; Poetry `[tool.poetry.dependencies]` + `dev-dependencies` + `group.*` |
+| `SetupCfgScanner` | `setup.cfg` | `pypi` | `[options] install_requires` + `[options.extras_require]` |
+| `PomScanner` | `pom.xml` | `maven` | `<dependencies>`, `<dependencyManagement>`, `<parent>`; `${property}` resolved from `<properties>`; `system` scope skipped; Java 8 projects (`java.version=1.8`) handled identically |
 
 ### Discovery walk
 
@@ -315,8 +317,10 @@ sequenceDiagram
 
 | Ecosystem | Registry | Latest version | Versions-behind |
 |---|---|---|---|
-| `npm` | `registry.npmjs.org/{pkg}` | `dist-tags.latest` | Count of versions between current and latest |
+| `npm` | `registry.npmjs.org/{pkg}` | `dist-tags.latest` | Count of `versions` map entries between current and latest |
 | `go` | `proxy.golang.org/{module}/@latest` + `@v/list` | `.Version` field | Count of listed versions newer than current |
+| `pypi` | `pypi.org/pypi/{pkg}/json` | `info.version` | Count of `releases` map keys between current and latest (pre-releases excluded) |
+| `maven` | `search.maven.org/solrsearch/select?q=g:{g}+AND+a:{a}` | `docs[0].latestVersion` | Count from `core=gav` version list query (up to 200 results) |
 
 ---
 
@@ -603,6 +607,27 @@ The `.gitignore` excludes `web/dist/*` (except `.gitkeep`) so the compiled asset
 | **Auth** | None for public modules |
 | **Module escaping** | `golang.org/x/mod/module.EscapePath` (capital letters → `!lower`) |
 
+### PyPI JSON API
+
+| | |
+|---|---|
+| **Endpoint** | `GET https://pypi.org/pypi/{package}/json` |
+| **Auth** | None |
+| **Used fields** | `info.version` (latest), `releases` map (for versions-behind count) |
+| **Pre-releases** | Filtered out using semver `Prerelease()` check — only stable versions counted |
+| **Override field** | `Resolver.PyPIRegistryURL` — points tests at a local `httptest.Server` |
+
+### Maven Central Search API
+
+| | |
+|---|---|
+| **Latest endpoint** | `GET https://search.maven.org/solrsearch/select?q=g:{g}+AND+a:{a}&wt=json&rows=1` |
+| **Version list endpoint** | `GET …&core=gav&wt=json&rows=200` |
+| **Auth** | None for public artifacts |
+| **Used fields** | `response.docs[0].latestVersion` (latest query); `docs[].v` (version list) |
+| **Coordinate format** | `groupId:artifactId` — the `Name` field in `models.Dependency` for maven ecosystem |
+| **Override field** | `Resolver.MavenCentralURL` — points tests at a local `httptest.Server` |
+
 ### OSV.dev Batch API
 
 | | |
@@ -613,6 +638,7 @@ The `.gitignore` excludes `web/dist/*` (except `.gitkeep`) so the compiled asset
 | **Response** | `{"results":[{"vulns":[{"id":"GHSA-…","summary":"…","database_specific":{"severity":"HIGH"}}]}]}` |
 | **Alignment** | `results[i]` corresponds exactly to `queries[i]` |
 | **Severity source** | Prefer `database_specific.severity`; fall back to `severity[0].score` (CVSS string) |
+| **Ecosystem mapping** | `npm`→`npm`, `pypi`→`PyPI`, `go`→`Go`, `maven`→`Maven` |
 
 ---
 
@@ -620,57 +646,54 @@ The `.gitignore` excludes `web/dist/*` (except `.gitkeep`) so the compiled asset
 
 ### Adding a new ecosystem scanner
 
-1. Create `scanner/yourscanner.go`
-2. Implement the `Scanner` interface
-3. Add it to `DefaultScanners()`
+1. Create `scanner/yourscanner.go`, implement the `Scanner` interface
+2. Add it to `DefaultScanners()` in `scanner/scanner.go`
+3. Add a `case "myecosystem":` branch in `resolver.resolveOne()`
 
 ```go
-// scanner/requirements.go
-type RequirementsTxtScanner struct{}
+// scanner/yourscanner.go
+type YourScanner struct{}
 
-func (s *RequirementsTxtScanner) Name() string               { return "python/requirements.txt" }
-func (s *RequirementsTxtScanner) Matches(path string) bool   { return filepath.Base(path) == "requirements.txt" }
-func (s *RequirementsTxtScanner) Parse(path, repoURL string) ([]models.Dependency, error) {
-    // parse requirements.txt, return deps with Ecosystem: "pypi"
+func (s *YourScanner) Name() string              { return "myecosystem/manifest.ext" }
+func (s *YourScanner) Matches(path string) bool  { return filepath.Base(path) == "manifest.ext" }
+func (s *YourScanner) Parse(path, repoURL string) ([]models.Dependency, error) {
+    // parse the file, return deps with Ecosystem: "myecosystem"
 }
 ```
 
-Then add a registry lookup branch in `resolver/resolver.go`:
+The resolved ecosystem name must match the key used in `ecosystemToOSV()` so CVE lookups work correctly.
+
+Reference implementations by complexity:
+- **Simple line parsing** — `scanner/requirements.go`
+- **INI-style sections** — `scanner/setupcfg.go`
+- **TOML with two format variants** — `scanner/pyproject.go`
+- **XML with property resolution** — `scanner/pom.go`
+
+### Anthropic advisor
+
+`advisor/anthropic.go` contains the full implementation. It uses forced tool use (`ToolChoiceParamOfTool("record_advisory")`) to reliably extract structured JSON from the model rather than parsing free-form prose:
 
 ```go
-func (r *Resolver) resolveOne(ctx context.Context, dep models.Dependency) (models.EnrichedDependency, error) {
-    switch dep.Ecosystem {
-    case "npm":   return r.resolveNPM(ctx, dep)
-    case "go":    return r.resolveGoProxy(ctx, dep)
-    case "pypi":  return r.resolvePyPI(ctx, dep)   // add your implementation
-    default:
-        return models.EnrichedDependency{Dependency: dep}, nil
-    }
+tool := anthropic.ToolParam{
+    Name:        "record_advisory",
+    Description: anthropic.String("Record the structured advisory report"),
+    InputSchema: anthropic.ToolInputSchemaParam{
+        Properties: map[string]any{
+            "summary":          map[string]any{"type": "string"},
+            "breaking_changes": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+            "migration_steps":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+        },
+    },
 }
+
+msg, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
+    Model:      anthropic.ModelClaudeOpus4_6,
+    MaxTokens:  1024,
+    System:     []anthropic.TextBlockParam{{Text: advisorSystemPrompt}},
+    Messages:   []anthropic.MessageParam{anthropic.NewUserMessage(...)},
+    Tools:      []anthropic.ToolUnionParam{{OfTool: &tool}},
+    ToolChoice: anthropic.ToolChoiceParamOfTool("record_advisory"),
+})
 ```
 
-### Wiring the real Anthropic advisor
-
-```go
-// advisor/anthropic.go
-func (a *AnthropicAdvisor) Advise(ctx context.Context, dep models.ScoredDependency) (models.AdvisoryReport, error) {
-    client := anthropic.NewClient(a.apiKey)
-
-    prompt := buildPrompt(dep) // construct from dep metadata + CVE summaries
-
-    msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-        Model:     anthropic.F(anthropic.ModelClaudeSonnet4_6),
-        MaxTokens: anthropic.F(int64(1024)),
-        Messages: anthropic.F([]anthropic.MessageParam{
-            anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-        }),
-    })
-    if err != nil {
-        return models.AdvisoryReport{}, err
-    }
-
-    return parseAnthropicResponse(dep, msg.Content[0].Text), nil
-}
-```
-
-See the `/claude-api` skill for a complete working example with the Anthropic Go SDK.
+Set `ANTHROPIC_API_KEY` to activate. Any API or parse error falls back to `StubAdvisor` so the pipeline always produces output.

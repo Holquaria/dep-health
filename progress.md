@@ -1,6 +1,6 @@
 # dep-health — Progress Tracker
 
-> Last updated: 2026-03-21 (session 2)
+> Last updated: 2026-03-21 (session 4)
 > Use this file to orient a new agent or pick up after a context reset.
 
 ---
@@ -9,15 +9,20 @@
 
 A Go CLI tool + web dashboard for scanning repositories for outdated dependencies, scoring them by risk, detecting peer conflict cascades, and generating AI-powered upgrade guidance. Built for a hackathon.
 
-**Two entry points:**
-- `dep-health scan [dir|--git-url]` — CLI, prints a ranked table
-- `dep-health serve` — starts an HTTP server + embedded React dashboard
+**Three entry points:**
+- `dep-health scan [dir|--git-url]` — CLI, prints a ranked table + cascade/blocked/migration sections
+- `dep-health scan-multi <target> <target> [...]` — scans multiple repos and aggregates with cross-repo scoring
+- `dep-health serve` — starts an HTTP server + embedded React dashboard with async scan history
+
+**Scope constraints established:**
+- PR creation is **explicitly out of scope** — no GitHub integration; the org uses GitLab with internal repos
+- There is no multi-repo / org-wide scanning target for this iteration
 
 ---
 
 ## Current state: working end-to-end
 
-The full pipeline runs today:
+The full pipeline runs today for all four ecosystems:
 
 ```
 git clone (optional) → scanner.Discover → resolver.Enrich → scorer.Score
@@ -36,6 +41,8 @@ dep-health serve --port 8080
 # open http://localhost:8080
 ```
 
+All tests pass: `go test ./...`
+
 ---
 
 ## Checklist
@@ -45,49 +52,52 @@ dep-health serve --port 8080
 - [x] `Dependency` struct (Name, CurrentVersion, Ecosystem, ManifestPath, RepoURL)
 - [x] `EnrichedDependency` struct (embeds Dependency + LatestVersion, SeverityGap, VersionsBehind, Vulnerabilities, PeerConstraints)
 - [x] `Vulnerability` struct (ID, Severity, Summary, URL)
-- [x] `ScoredDependency` struct (embeds EnrichedDependency + RiskScore, CrossRepoCount, Reasons, BlockedBy, CascadeGroup)
+- [x] `ScoredDependency` struct (embeds EnrichedDependency + RiskScore, CrossRepoCount, **RepoSource**, Reasons, BlockedBy, CascadeGroup)
 - [x] `AdvisoryReport` struct (embeds ScoredDependency + Summary, BreakingChanges, MigrationSteps, PRUrl)
+- [x] `MultiRepoReport` struct — Targets, PerRepo, AllDeps, Stats, Errors
+- [x] `MultiRepoStats` struct — TotalRepos, TotalOutdated, TotalCVEs, CascadeGroups, BlockedDeps
 - [x] JSON tags on all structs
 
 ### Scanner (`scanner/`)
 
 - [x] `Scanner` interface (`Name`, `Matches`, `Parse`)
-- [x] `package.json` parser — `dependencies` + `devDependencies`, range operators stripped
-- [x] `go.mod` parser — direct + indirect deps, local replacements excluded, `golang.org/x/mod/modfile`
-- [x] `requirements.txt` parser — `RequirementsTxtScanner`, handles `==`, `>=`, `~=`, extras, env markers, comments
-- [ ] `pom.xml` / `build.gradle` parser
-- [x] Tests — `scanner_test.go`, `gomod_test.go`, `requirements_test.go` (parsing, version stripping, dir skipping, env markers, extras, options)
+- [x] `PackageJSONScanner` — `package.json`, dependencies + devDependencies, range operators stripped
+- [x] `GoModScanner` — `go.mod`, direct + indirect deps, local replacements excluded, uses `golang.org/x/mod/modfile`
+- [x] `RequirementsTxtScanner` — `requirements.txt` + `requirements-*.txt`, handles `==`, `>=`, `~=`, `<=`, extras, env markers, pip options (`-r`, `--index-url`)
+- [x] `PyprojectScanner` — `pyproject.toml`, PEP 621 `[project] dependencies` + optional-dependencies, Poetry `[tool.poetry.dependencies]` + dev-dependencies + groups, uses `github.com/BurntSushi/toml`
+- [x] `SetupCfgScanner` — `setup.cfg`, `install_requires` + `extras_require`, multi-line continuation, inline comments
+- [x] `PomScanner` — `pom.xml`, `<dependencies>`, `<dependencyManagement>`, `<parent>`, `${property}` resolution, system-scope skipped, Java 8 compatible
+- [x] `DefaultScanners()` registers all six
+- [x] Tests — `scanner_test.go`, `gomod_test.go`, `requirements_test.go`, `pyproject_test.go`, `setupcfg_test.go`, `pom_test.go`
 
 ### Resolver (`resolver/resolver.go`)
 
 - [x] npm registry lookup — `registry.npmjs.org/{pkg}`, `dist-tags.latest`, peer constraints
 - [x] Go module proxy — `proxy.golang.org/{module}/@latest` + `@v/list`
-- [x] OSV.dev batch API — single `POST /v1/querybatch` for all packages
+- [x] PyPI JSON API — `pypi.org/pypi/{pkg}/json`, pre-releases excluded from versions-behind count
+- [x] Maven Central search API — `search.maven.org/solrsearch/select`, `g:{g}+AND+a:{a}`, `core=gav` for version list
+- [x] OSV.dev batch API — single `POST /v1/querybatch` for all packages; ecosystem mapping: npm→npm, pypi→PyPI, go→Go, maven→Maven
 - [x] Peer constraint extraction — `versions[latest].peerDependencies` → `PeerConstraints map[string]string`
-- [x] Concurrent lookups — goroutines + semaphore (`chan struct{}`), configurable cap
-- [x] Testable via injected URLs — `NPMRegistryURL`, `OSVBatchURL` fields on `Resolver`
-- [x] PyPI JSON API lookup — `resolvePyPI()` hitting `pypi.org/pypi/{pkg}/json`, `PyPIRegistryURL` override field for tests
-- [ ] Maven Central lookup
+- [x] Concurrent lookups — goroutines + semaphore (`chan struct{}`), configurable via `DEP_HEALTH_MAX_CONCURRENCY` (default 10)
+- [x] Testable via injected URLs — `NPMRegistryURL`, `OSVBatchURL`, `PyPIRegistryURL`, `MavenCentralURL` fields on `Resolver`
 - [x] Tests — `resolver_test.go` with `httptest` mock server (peer constraints, versions-behind, 404, concurrent batch)
 
 ### Scorer (`scorer/`)
 
-- [x] Weighted risk formula — CVE 40%, version gap 30%, versions-behind 20%, cross-repo 10%
+- [x] Weighted risk formula — CVE severity 40%, version gap 30%, versions-behind 20%, cross-repo count 10%
 - [x] Peer conflict detection — semver constraint checking via `Masterminds/semver/v3`
 - [x] Cascade group assignment — union-find, lexicographic root for determinism
 - [x] `BlockedBy` detection — set when peer's latest can't satisfy the constraint
 - [x] Sorted output — descending by `RiskScore`
 - [x] Tests — `conflict_test.go`, 9 cases (cascade, blocked, three-way, mixed, empty, determinism)
 
-### Advisor (`advisor/advisor.go`)
+### Advisor (`advisor/`)
 
 - [x] `Advisor` interface — `Advise(ctx, ScoredDependency) (AdvisoryReport, error)`
-- [x] `StubAdvisor` — deterministic summary + breaking-change warnings + ecosystem migration steps
-- [x] `AnthropicAdvisor.Advise()` — full implementation in `advisor/anthropic.go`, activated via `ANTHROPIC_API_KEY`, falls back to stub on any error
-- [ ] Changelog fetching — GitHub Releases API / CHANGELOG.md
-- [ ] PR creation — `PRUrl` field exists in `AdvisoryReport`, nothing populates it yet
-- [ ] Cascade-aware bundled PR generation
-- [x] Tests for advisor package — `advisor/advisor_test.go`, 8 cases (summary content, major/minor breaking, ecosystem steps, CVE step, determinism, embedded dep)
+- [x] `StubAdvisor` — deterministic summary + breaking-change warnings + ecosystem migration steps (npm/pypi/go/maven)
+- [x] `AnthropicAdvisor` — `advisor/anthropic.go`, forced `record_advisory` tool call for structured JSON output, activated via `ANTHROPIC_API_KEY`, falls back to stub on any error
+- [x] Tests — `advisor_test.go`, 8 cases (summary content, major/minor breaking changes, NPM/PyPI/Go ecosystem steps, CVE step, determinism, embedded dep)
+- [ ] Changelog fetching — GitHub Releases API / CHANGELOG.md scraping (not started)
 
 ### Pipeline (`pipeline/pipeline.go`)
 
@@ -106,7 +116,6 @@ dep-health serve --port 8080
 - [x] Blocked dependency section below table
 - [x] Migration hints for top 3 packages
 - [x] `--json` flag — emits `[]AdvisoryReport` as indented JSON
-- [ ] `--create-prs` flag
 
 ### Store (`store/store.go`)
 
@@ -125,19 +134,36 @@ dep-health serve --port 8080
 - [x] `POST /api/scans` — async trigger (202 Accepted), accepts `dir` or `git_url`
 - [x] SPA fallback — serves `dist/index.html` for unmatched routes
 - [x] In-flight scan tracking with `context.CancelFunc` map
+- [x] `looksLikeGitURL()` auto-promotion — if `dir` looks like a remote URL (`https://`, `http://`, `git@`, `git://`) and `git_url` is unset, silently promotes to git clone path
 
 ### Frontend (`frontend/src/`)
 
 - [x] Vite + React 18 + React Router v6
 - [x] Embedded into binary via `//go:embed dist` (`web/embed.go`)
-- [x] `ScanList` page — trigger form (local/remote toggle), history table, auto-polls while running
+- [x] `ScanList` page — trigger form (local/remote toggle), scan history table, auto-polls while running
 - [x] `ScanDetail` page — run metadata, deps table, migration hints, cascade + blocked panels
-- [x] `DepsTable` — colored left-border stripe per cascade group, colored CASCADE badge
+- [x] `DepsTable` — colored left-border stripe per cascade group, CASCADE/BLOCKED badges
 - [x] `CascadePanel` — matching group colors, dot indicators
 - [x] `BlockedPanel` — blocked deps with peer constraint details
+- [x] `MigrationPanel` — top-3 riskiest packages with steps and breaking-change warnings
 - [x] `RiskBadge`, `StatusBadge` components
 - [x] Dark theme CSS design system
-- [x] `cascadeColor.js` — deterministic group→color mapping (hash → palette)
+- [x] Deterministic cascade group → color mapping (hash → 6-color palette)
+- [x] Auto-detect URL pasted into local path field — switches to "Git URL" mode automatically
+
+### Test fixtures (`testdata/`)
+
+| Fixture | Ecosystems | Highlights |
+|---|---|---|
+| `testdata/npm-only` | npm | lodash@3, axios@0.21 — CVEs, babel+webpack cascade group |
+| `testdata/python-only` | requirements.txt | Flask@1.1, Werkzeug@1 — 13 CVEs on Werkzeug |
+| `testdata/python-pyproject` | pyproject.toml (PEP 621) | Django@3.2 — 55 known CVEs |
+| `testdata/python-setupcfg` | setup.cfg | Flask + SQLAlchemy, extras_require sections |
+| `testdata/java-maven` | pom.xml | Spring Boot 2.6 / Java 8, log4j 2.14.1 pre-Log4Shell (5 CVEs) |
+| `testdata/go-only` | go.mod | gin@1.7.7, cobra@1.2.1, viper@1.9.0 |
+| `testdata/mixed` | npm + Python + Go | Multi-ecosystem in a single directory |
+| `testdata/cascade` | npm | React@16 — 4-package cascade (react, react-dom, react-router-dom, @testing-library/react) |
+| `testdata/no-deps` | — | Empty manifests — graceful-empty handling |
 
 ---
 
@@ -171,14 +197,18 @@ Packages:   models ← scanner, resolver, scorer, advisor
 | `models/models.go` | All shared structs with JSON tags |
 | `scanner/scanner.go` | `Scanner` interface + `PackageJSONScanner` + `Discover()` |
 | `scanner/gomod.go` | `GoModScanner` using `golang.org/x/mod/modfile` |
-| `resolver/resolver.go` | npm + Go proxy + OSV.dev, concurrent with semaphore |
+| `scanner/requirements.go` | `RequirementsTxtScanner` — PEP 508 parsing |
+| `scanner/pyproject.go` | `PyprojectScanner` — PEP 621 + Poetry, TOML via BurntSushi/toml |
+| `scanner/setupcfg.go` | `SetupCfgScanner` — INI-style, install_requires + extras |
+| `scanner/pom.go` | `PomScanner` — XML + property resolution, Java 8 compatible |
+| `resolver/resolver.go` | npm · Go proxy · PyPI · Maven Central · OSV.dev batch |
 | `scorer/scorer.go` | Weighted risk formula |
 | `scorer/conflicts.go` | `DetectConflicts` + union-find |
 | `advisor/advisor.go` | `Advisor` interface + `StubAdvisor` |
-| `advisor/anthropic.go` | `AnthropicAdvisor` — full Anthropic API implementation via tool use |
+| `advisor/anthropic.go` | `AnthropicAdvisor` — Anthropic API via forced tool use |
 | `pipeline/pipeline.go` | Orchestrates all stages, handles git clone |
 | `store/store.go` | SQLite persistence |
-| `server/server.go` | REST API + SPA handler |
+| `server/server.go` | REST API + SPA handler + URL auto-promotion |
 | `cmd/scan.go` | CLI scan subcommand |
 | `cmd/serve.go` | CLI serve subcommand |
 | `frontend/src/` | React dashboard |
@@ -188,6 +218,7 @@ Packages:   models ← scanner, resolver, scorer, advisor
 
 ```
 github.com/anthropics/anthropic-sdk-go v1.27.1
+github.com/BurntSushi/toml v1.6.0
 github.com/Masterminds/semver/v3 v3.2.1
 github.com/olekukonko/tablewriter v0.0.5
 github.com/spf13/cobra v1.8.1
@@ -197,23 +228,40 @@ modernc.org/sqlite v1.34.4
 
 ---
 
-## What to build next (prioritised)
+## Known gaps / possible next steps
 
-### 1. PR creation — closes the original pitch loop
+These are open questions, not committed items. No explicit next-step has been agreed with the user yet.
 
-Populate `AdvisoryReport.PRUrl`. Even a draft GitHub PR with the migration steps in the body closes the original pitch loop.
-- `--create-prs` flag on `scan` subcommand
-- GitHub API: `POST /repos/{owner}/{repo}/pulls`
-- `GITHUB_TOKEN` already loaded in config
+### Score / signal quality
+- Cross-repo count is always 0 — the field exists in the model but nothing currently populates it (would need a multi-repo index or a crawl)
+- Version-gap scoring treats all major bumps equally; a v1→v2 bump on a library with 2 releases looks the same as log4j 2.14→3.0 with 26 releases
+- No differentiation between transitive and direct dependencies in risk scoring
 
-### 2. `pyproject.toml` / `setup.py` scanner — extends Python coverage
+### Coverage gaps
+- No `Cargo.toml` (Rust) scanner
+- No `build.gradle` / `build.gradle.kts` (Gradle / Kotlin) scanner
+- No `composer.json` (PHP) scanner
+- No `Package.swift` (Swift) scanner
+- `requirements*.txt` glob could miss `requirements/base.txt` style layouts
 
-- Parse `[project] dependencies` (PEP 621) and `install_requires` (setuptools)
-- Ecosystem: `"pypi"`, resolver already handles it
+### Resolver / data quality
+- Maven Central version list capped at 200 results; very prolific packages may under-count versions-behind
+- PyPI pre-release detection uses `semver.Prerelease() != ""` — packages that don't follow semver (e.g. `1.0.0b1`) may be misclassified
+- No retry / back-off on registry errors; a single transient 429 fails the whole dep
+- OSV.dev batch size is unbounded — large repos could hit API limits
 
-### 3. `pom.xml` / Maven — lower priority
+### UX / polish
+- No sorting/filtering controls in the dashboard dep table
+- No way to re-run a scan from the detail page
+- No export (CSV / JSON) from the dashboard
+- No search across scan history
+- Scan duration on the list page is computed client-side; clock skew between server and browser can make it wrong
 
-Harder to demo, adds complexity. Skip unless Java-specific judges are expected.
+### Observability / ops
+- No structured logging on the server (just stderr from the pipeline)
+- No health/readiness endpoint (`GET /healthz`)
+- SQLite WAL checkpoint never forced; long-running servers accumulate WAL
+- No rate limiting on `POST /api/scans` — trivial to flood the server
 
 ---
 
@@ -222,8 +270,7 @@ Harder to demo, adds complexity. Skip unless Java-specific judges are expected.
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Activates `AnthropicAdvisor` (otherwise stub is used) |
-| `GITHUB_TOKEN` | Injected into HTTPS git clone URLs for private repos; future PR creation |
-| `DEP_HEALTH_ORG` | Organisation name for future multi-repo scanning |
+| `GITHUB_TOKEN` | Injected into HTTPS git clone URLs for private repos |
 | `DEP_HEALTH_MAX_CONCURRENCY` | Max parallel registry requests (default: 10) |
 | `DEP_HEALTH_DB` | SQLite database path for server (default: `dep-health.db`) |
 
@@ -243,4 +290,20 @@ go build -o dep-health .
 
 # Run tests
 go test ./...
+```
+
+### Quick demo fixtures
+
+```bash
+# Java / Spring Boot / log4j 2.14.1 (5 CVEs including Log4Shell)
+./dep-health scan testdata/java-maven
+
+# React peer-conflict cascade (4 packages that must upgrade together)
+./dep-health scan testdata/cascade
+
+# Django 3.2 — 55 CVEs
+./dep-health scan testdata/python-pyproject
+
+# Multi-ecosystem: npm + Python + Go
+./dep-health scan testdata/mixed
 ```

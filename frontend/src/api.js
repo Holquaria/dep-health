@@ -24,3 +24,13 @@ export async function triggerScan(dir = '', gitUrl = '', repoUrl = '') {
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
+
+export async function triggerMultiScan(targets = []) {
+  const res = await fetch(`${BASE}/scans/multi`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targets }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}

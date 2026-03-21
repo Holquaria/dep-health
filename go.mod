@@ -3,7 +3,9 @@ module dep-health
 go 1.23.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/semver/v3 v3.2.1
+	github.com/anthropics/anthropic-sdk-go v1.27.1
 	github.com/olekukonko/tablewriter v0.0.5
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/mod v0.22.0
@@ -11,7 +13,6 @@ require (
 )
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.27.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect

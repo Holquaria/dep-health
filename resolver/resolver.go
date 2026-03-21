@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	npmRegistryBase  = "https://registry.npmjs.org"
-	pypiRegistryBase = "https://pypi.org/pypi"
-	osvBatchURL      = "https://api.osv.dev/v1/querybatch"
+	npmRegistryBase    = "https://registry.npmjs.org"
+	pypiRegistryBase   = "https://pypi.org/pypi"
+	mavenCentralSearch = "https://search.maven.org/solrsearch/select"
+	osvBatchURL        = "https://api.osv.dev/v1/querybatch"
 
 	defaultConcurrency = 10
 )
@@ -43,6 +44,10 @@ type Resolver struct {
 	// the default (https://pypi.org/pypi).  Set in tests to point at a local
 	// httptest.Server.
 	PyPIRegistryURL string
+	// MavenCentralURL overrides the Maven Central search endpoint.  Leave empty
+	// to use the default (https://search.maven.org/solrsearch/select).  Set in
+	// tests to point at a local httptest.Server.
+	MavenCentralURL string
 	// OSVBatchURL overrides the OSV.dev batch endpoint.  Leave empty to use
 	// the default.  Set in tests to point at a local httptest.Server.
 	OSVBatchURL string
@@ -70,6 +75,14 @@ func (r *Resolver) pypiBase() string {
 		return r.PyPIRegistryURL
 	}
 	return pypiRegistryBase
+}
+
+// mavenBase returns the Maven Central search URL, falling back to the package constant.
+func (r *Resolver) mavenBase() string {
+	if r.MavenCentralURL != "" {
+		return r.MavenCentralURL
+	}
+	return mavenCentralSearch
 }
 
 // osvEndpoint returns the OSV batch URL, falling back to the package constant.
@@ -134,6 +147,8 @@ func (r *Resolver) resolveOne(ctx context.Context, dep models.Dependency) (model
 		return r.resolveGoProxy(ctx, dep)
 	case "pypi":
 		return r.resolvePyPI(ctx, dep)
+	case "maven":
+		return r.resolveMaven(ctx, dep)
 	default:
 		// Return the raw dep unchanged; other ecosystems are not yet implemented.
 		return models.EnrichedDependency{Dependency: dep}, nil
@@ -495,6 +510,120 @@ func countVersionsBehindPyPI(current, latest string, releases map[string]json.Ra
 		}
 	}
 	return count
+}
+
+// ── Maven Central search API ──────────────────────────────────────────────────
+
+// mavenSearchResponse is the outer wrapper returned by Maven Central's Solr API.
+type mavenSearchResponse struct {
+	Response struct {
+		NumFound int `json:"numFound"`
+		Docs     []struct {
+			LatestVersion string `json:"latestVersion"`
+			Version       string `json:"v"` // only set in core=gav queries
+		} `json:"docs"`
+	} `json:"response"`
+}
+
+// resolveMaven looks up the latest version for a Maven artifact on Maven Central.
+//
+// The dep.Name must be in "groupId:artifactId" format as produced by PomScanner.
+// Two requests are made:
+//  1. Latest version query → populates LatestVersion and SeverityGap.
+//  2. Version list query   → populates VersionsBehind (best-effort, 0 on failure).
+func (r *Resolver) resolveMaven(ctx context.Context, dep models.Dependency) (models.EnrichedDependency, error) {
+	parts := strings.SplitN(dep.Name, ":", 2)
+	if len(parts) != 2 {
+		return models.EnrichedDependency{Dependency: dep},
+			fmt.Errorf("invalid maven coordinate %q (expected groupId:artifactId)", dep.Name)
+	}
+	g, a := parts[0], parts[1]
+
+	// Request 1: latest version.
+	latest, err := r.mavenLatest(ctx, g, a)
+	if err != nil {
+		return models.EnrichedDependency{Dependency: dep}, err
+	}
+
+	// Request 2: full version list for VersionsBehind (best-effort).
+	versions, _ := r.mavenVersionList(ctx, g, a)
+
+	gap := computeSeverityGap(dep.CurrentVersion, latest)
+	behind := countVersionsBehindList(dep.CurrentVersion, latest, versions)
+
+	return models.EnrichedDependency{
+		Dependency:     dep,
+		LatestVersion:  latest,
+		SeverityGap:    gap,
+		VersionsBehind: behind,
+	}, nil
+}
+
+func (r *Resolver) mavenLatest(ctx context.Context, g, a string) (string, error) {
+	url := fmt.Sprintf("%s?q=g:%s+AND+a:%s&wt=json&rows=1", r.mavenBase(), g, a)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := r.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Maven Central returned HTTP %d for %s:%s", resp.StatusCode, g, a)
+	}
+
+	var result mavenSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decoding Maven Central response: %w", err)
+	}
+	if result.Response.NumFound == 0 || len(result.Response.Docs) == 0 {
+		return "", fmt.Errorf("artifact %s:%s not found on Maven Central", g, a)
+	}
+
+	latest := result.Response.Docs[0].LatestVersion
+	if latest == "" {
+		return "", fmt.Errorf("no latestVersion in Maven Central response for %s:%s", g, a)
+	}
+	return latest, nil
+}
+
+// mavenVersionList fetches all known versions for a Maven artifact using the
+// core=gav endpoint (up to 200 results — sufficient for VersionsBehind counting).
+func (r *Resolver) mavenVersionList(ctx context.Context, g, a string) ([]string, error) {
+	url := fmt.Sprintf("%s?q=g:%s+AND+a:%s&core=gav&wt=json&rows=200", r.mavenBase(), g, a)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := r.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Maven Central (core=gav) returned HTTP %d", resp.StatusCode)
+	}
+
+	var result mavenSearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	versions := make([]string, 0, len(result.Response.Docs))
+	for _, doc := range result.Response.Docs {
+		if doc.Version != "" {
+			versions = append(versions, doc.Version)
+		}
+	}
+	return versions, nil
 }
 
 // ── OSV.dev batch vulnerability lookup ───────────────────────────────────────

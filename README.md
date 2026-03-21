@@ -1,256 +1,349 @@
 # dep-health
 
-A CLI tool and web dashboard that scans repositories for outdated dependencies, scores them by risk, detects peer conflict cascades, and generates upgrade guidance — with optional AI-powered changelog summaries via the Anthropic API.
+A CLI tool and web dashboard that scans repositories for outdated dependencies, scores them by risk, detects peer-conflict cascades, and generates upgrade guidance — with optional AI-powered summaries via the Anthropic API.
 
 ```
-→ Cloning https://github.com/org/repo …
-→ Scanning /tmp/dep-health-clone-123 …
-  Found 47 dependencies across 2 manifest(s)
+→ Scanning testdata/java-maven …
+→ Found 13 dependencies
 → Resolving versions and checking OSV.dev for CVEs …
 → Scoring and detecting peer conflicts …
 → Generating advisory reports …
 
-+----+-------------------+---------+---------+-------+--------+------------+-------+---------+-------------------------------+
-| #  | PACKAGE           | CURRENT | LATEST  | GAP   | BEHIND | CVES       | SCORE | FLAGS   | TOP REASON                    |
-+----+-------------------+---------+---------+-------+--------+------------+-------+---------+-------------------------------+
-|  1 | lodash            | 4.17.11 | 4.17.21 | patch |     10 | 4 (HIGH)   |  62.0 |         | 4 known CVE(s), highest: HIGH |
-|  2 | next              | 13.0.0  | 15.0.0  | major |      8 | -          |  55.0 | CASCADE | major version gap             |
-|  3 | react             | 18.2.0  | 19.0.0  | major |      4 | -          |  48.0 | CASCADE | must upgrade with next        |
-|  4 | express           | 4.16.0  | 4.19.2  | minor |     18 | 1 (MEDIUM) |  41.0 |         | minor version gap             |
-+----+-------------------+---------+---------+-------+--------+------------+-------+---------+-------------------------------+
++----+-------------------------------------------+-------------+----------+-------+--------+------+-------+
+| #  | PACKAGE                                   | CURRENT     | LATEST   | GAP   | BEHIND | CVES | SCORE |
++----+-------------------------------------------+-------------+----------+-------+--------+------+-------+
+|  1 | org.apache.logging.log4j:log4j-core       | 2.14.1      | 3.0.0    | major |     26 | 5 () |  50.0 |
+|  2 | org.springframework.boot:spring-boot-*    | 2.6.0       | 3.5.3    | major |    100 | 1 () |  50.0 |
+|  3 | com.fasterxml.jackson.core:jackson-databind | 2.13.0    | 2.19.0   | minor |     37 | 4 () |  35.0 |
++----+-------------------------------------------+-------------+----------+-------+--------+------+-------+
 ```
+
+---
 
 ## Features
 
-- **Manifest discovery** — recursively walks a directory, finds `package.json` and `go.mod` files, skips `node_modules`, `.git`, `vendor`
-- **Remote scanning** — clones any git repository (`--git-url`) before scanning; no need to check out locally
-- **Registry resolution** — fetches the latest version from npm and the Go module proxy; counts published releases in between
-- **CVE detection** — queries the [OSV.dev](https://osv.dev) batch API for all discovered packages in a single request
-- **Peer conflict detection** — identifies npm peer dependency cascades (packages that must upgrade together) and blocked upgrades (no compatible peer version exists)
-- **Risk scoring** — weighted formula across four signals (CVE severity, version gap, release count, cross-repo prevalence) producing a 0–100 score
-- **Upgrade guidance** — migration steps and breaking-change warnings for each high-risk dependency
-- **AI advisor** — optionally calls the Anthropic API for richer, context-aware changelog summaries (set `ANTHROPIC_API_KEY`)
-- **Web dashboard** — `dep-health serve` starts a React dashboard with a REST API; trigger scans, browse history, and inspect results in a browser
-- **SQLite persistence** — scan results are stored in a local SQLite database; history survives server restarts
-- **JSON output** — `--json` emits machine-readable results for CI pipeline integration
+- **Multi-ecosystem scanning** — discovers manifests recursively; skips `node_modules`, `.git`, `vendor`, `.venv`
+- **Supported manifest formats:**
+  - npm — `package.json` (dependencies + devDependencies)
+  - Go — `go.mod` (direct + indirect, local replacements excluded)
+  - Python — `requirements.txt`, `pyproject.toml` (PEP 621 + Poetry), `setup.cfg`
+  - Java — `pom.xml` (dependencies, dependencyManagement, parent, `${property}` resolution)
+- **Remote scanning** — `--git-url` clones any repo with `--depth 1` then removes the clone
+- **CVE detection** — single batch query to [OSV.dev](https://osv.dev) for all discovered packages
+- **Registry resolution** — npm registry, Go module proxy, PyPI JSON API, Maven Central search API
+- **Risk scoring** — weighted formula across CVE severity, version gap, release count, cross-repo prevalence
+- **Peer conflict detection** — cascade groups (must upgrade together) and blocked upgrades
+- **Upgrade guidance** — ecosystem-specific migration steps and breaking-change warnings
+- **AI advisor** — optional Anthropic API integration for richer changelog summaries (set `ANTHROPIC_API_KEY`)
+- **Web dashboard** — React SPA with real-time scan progress, dep table, cascade panel, migration hints
+- **SQLite persistence** — scan history survives server restarts
+- **JSON output** — `--json` flag for CI pipeline consumption
 
-## Installation
+---
 
-Requires **Go 1.22+** and **Node.js 18+** (for the dashboard only).
+## Prerequisites
+
+| Tool | Version | Required for |
+|---|---|---|
+| Go | 1.22+ | building and running dep-health |
+| Node.js | 18+ | building the web dashboard |
+| npm | 8+ | installing frontend dependencies |
+| git | any | `--git-url` remote scanning |
+
+---
+
+## Running locally
+
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/your-org/dep-health
 cd dep-health
+```
+
+### 2. Install Go dependencies
+
+```bash
 go mod tidy
+```
 
-# Build the frontend (required for the serve command)
-cd frontend && npm install && npm run build && cd ..
+### 3. Build the frontend
 
-# Compile the binary (frontend is embedded)
+The dashboard is a Vite + React app that gets embedded into the Go binary at build time via `//go:embed`. **You must build it before compiling the binary** — otherwise `dep-health serve` will serve an empty UI.
+
+```bash
+cd frontend
+npm install
+npm run build    # outputs to ../web/dist/
+cd ..
+```
+
+### 4. Compile the binary
+
+```bash
 go build -o dep-health .
-
-# Optionally move to PATH
-mv dep-health /usr/local/bin/
 ```
 
-## Quick start
+### 5. Scan something
 
-### CLI — local scan
+The quickest way to see results is to scan one of the included test fixtures — no network setup required beyond the registry lookups:
 
 ```bash
-# Scan a local project
-dep-health scan ./my-project
+# Java 8 / Spring Boot 2.6 + log4j 2.14.1 (Log4Shell — 5 CVEs)
+./dep-health scan testdata/java-maven
 
-# Show only the 10 highest-risk packages
-dep-health scan ./my-project --top 10
+# React peer-conflict cascade (4 packages that must upgrade together)
+./dep-health scan testdata/cascade
 
-# Suppress low-risk noise (score < 30)
-dep-health scan ./my-project --min-score 30
+# Multi-ecosystem: npm + Python + Go in one directory
+./dep-health scan testdata/mixed
 
-# Emit JSON for CI pipelines
-dep-health scan ./my-project --json
+# Python pyproject.toml — Django 3.2 with 55 CVEs
+./dep-health scan testdata/python-pyproject
 ```
 
-### CLI — remote scan
+Or scan a real project:
 
 ```bash
-# Scan a public GitHub repo (clones with --depth 1, then deletes the clone)
-dep-health scan --git-url https://github.com/org/repo
-
-# Scan a private repo (token injected automatically into the clone URL)
-GITHUB_TOKEN=ghp_… dep-health scan --git-url https://github.com/org/private-repo
-
-# SSH also works (uses host key agent)
-dep-health scan --git-url git@github.com:org/repo.git
+./dep-health scan /path/to/your/project
+./dep-health scan --git-url https://github.com/expressjs/express
+./dep-health scan --git-url https://github.com/pallets/flask
 ```
 
-### Dashboard
+### 6. Start the dashboard
 
 ```bash
-# Start the server (default port 8080)
-dep-health serve
+./dep-health serve            # default port 8080
+./dep-health serve --port 9000 --db ./my-scans.db
 
-# Custom port and database path
-dep-health serve --port 9000 --db /var/lib/dep-health/scans.db
-
-# Then open the dashboard
-open http://localhost:8080
+open http://localhost:8080    # macOS; use xdg-open on Linux
 ```
 
-From the dashboard you can trigger scans (local path or Git URL), watch them run in real time, and browse the full dependency table with cascade groups, blocked upgrade warnings, and migration hints.
+From the dashboard you can trigger scans by local path or Git URL, watch progress in real time, and browse the full dep table with cascade groups, blocked upgrades, and migration hints.
+
+---
+
+## Development workflow
+
+### Frontend hot-reload
+
+Vite is configured to proxy `/api/*` to port 8080, so you can develop the frontend against a live scan server with hot module replacement:
+
+```bash
+# Terminal 1 — Go server
+./dep-health serve
+
+# Terminal 2 — Vite dev server (http://localhost:5173)
+cd frontend && npm run dev
+```
+
+### Run the full test suite
+
+```bash
+go test ./...                  # all packages (~50 tests)
+go test ./scanner/...          # manifest parsing (npm, Go, Python, Java)
+go test ./resolver/...         # registry + OSV mock server tests
+go test ./scorer/...           # conflict detection + risk scoring
+go test ./advisor/...          # advisory stub (deterministic output)
+```
+
+### Enable the AI advisor
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-…
+./dep-health scan testdata/java-maven
+```
+
+The pipeline selects `AnthropicAdvisor` automatically when `ANTHROPIC_API_KEY` is set. Without it the deterministic `StubAdvisor` runs, so development and CI work without any API key.
+
+---
+
+## Test fixtures
+
+`testdata/` contains controlled manifest files with intentionally old pinned versions — no real source code. Use them for development, demos, and regression testing without needing an external repo.
+
+| Fixture | Ecosystems | Highlights |
+|---|---|---|
+| `testdata/npm-only` | npm | lodash@3, axios@0.21 — CVEs, babel+webpack cascade group |
+| `testdata/python-only` | requirements.txt | Flask@1.1, Werkzeug@1 — 13 CVEs on Werkzeug |
+| `testdata/python-pyproject` | pyproject.toml (PEP 621) | Django@3.2 — 55 known CVEs |
+| `testdata/python-setupcfg` | setup.cfg | Flask + SQLAlchemy, extras_require sections |
+| `testdata/java-maven` | pom.xml | Spring Boot 2.6 / Java 8, log4j 2.14.1 pre-Log4Shell (5 CVEs) |
+| `testdata/mixed` | npm + Python + Go | Multi-ecosystem in a single directory |
+| `testdata/cascade` | npm | React@16 — 4-package cascade (react, react-dom, react-router-dom, @testing-library/react) |
+| `testdata/no-deps` | — | Empty manifests — graceful-empty handling |
+
+---
 
 ## CLI reference
 
 ### `dep-health scan [directory]`
 
+Either `directory` or `--git-url` must be provided.
+
 | Flag | Default | Description |
 |---|---|---|
-| `--git-url <url>` | `""` | Remote git repository to clone and scan (HTTPS or SSH) |
-| `--repo <url>` | `""` | Repository URL attached to every dependency (informational) |
-| `--top <n>` | `0` (all) | Limit output to the N highest-risk packages |
-| `--min-score <f>` | `0` | Hide packages with a risk score below this threshold (0–100) |
-| `--json` | `false` | Emit raw JSON instead of the formatted table |
-
-Either a `directory` argument or `--git-url` must be provided.
+| `--git-url <url>` | — | Remote repo to clone and scan (HTTPS or SSH) |
+| `--repo <url>` | — | Repository URL to attach to each dep (informational) |
+| `--top <n>` | 0 (all) | Show only the N highest-risk packages |
+| `--min-score <f>` | 0 | Hide packages with a risk score below this threshold |
+| `--json` | false | Emit `[]AdvisoryReport` as indented JSON instead of the table |
 
 ### `dep-health serve`
 
 | Flag | Default | Description |
 |---|---|---|
-| `--port <n>` | `8080` | Port to listen on |
-| `--db <path>` | `dep-health.db` | Path to the SQLite database file |
+| `--port <n>` | 8080 | HTTP port to listen on |
+| `--db <path>` | `dep-health.db` | SQLite database path |
+
+---
+
+## Environment variables
+
+| Variable | Description |
+|---|---|
+| `ANTHROPIC_API_KEY` | Activates AI-powered upgrade summaries; omit to use the stub advisor |
+| `GITHUB_TOKEN` | Injected into HTTPS clone URLs for private repository access |
+| `DEP_HEALTH_MAX_CONCURRENCY` | Max parallel registry requests (default: `10`) |
+| `DEP_HEALTH_DB` | SQLite database path for `serve` (default: `dep-health.db`) |
+
+---
 
 ## Output explained
 
 | Column | Meaning |
 |---|---|
 | **#** | Rank by risk score (1 = highest risk) |
-| **Package** | Package name as it appears in the manifest |
+| **Package** | Name as in the manifest; Maven uses `groupId:artifactId` |
 | **Current** | Version pinned in the manifest (range operators stripped) |
-| **Latest** | Latest stable version according to the registry |
+| **Latest** | Latest stable release from the registry |
 | **Gap** | `patch` / `minor` / `major` — semver distance class |
-| **Behind** | Number of published releases between current and latest |
-| **CVEs** | Count of known vulnerabilities and highest severity from OSV.dev |
-| **Score** | Weighted risk score 0–100 (red ≥ 70, yellow ≥ 40, green < 40) |
-| **Flags** | `CASCADE` — must upgrade with other packages; `BLOCKED` — no safe upgrade path |
+| **Behind** | Published releases between current and latest |
+| **CVEs** | Count of known vulnerabilities from OSV.dev |
+| **Score** | Risk score 0–100 (red ≥ 70, amber ≥ 40, green < 40) |
+| **Flags** | `CASCADE` — must upgrade with peers; `BLOCKED` — no safe upgrade path exists |
 | **Top Reason** | Primary factor driving the score |
 
-After the table, three additional sections are printed when relevant:
+Below the table, three sections appear when applicable:
 
-- **Migration hints** — step-by-step upgrade commands for the top 3 riskiest packages
-- **Cascade Groups** — packages that share a peer dependency constraint and must be upgraded together
-- **Blocked Dependencies** — packages whose upgrade is blocked because no existing version of a required peer satisfies the constraint
+- **Migration hints** — ecosystem-specific upgrade commands for the top 3 riskiest packages, with breaking-change warnings for major bumps and a CVE verification reminder
+- **Cascade Groups** — packages that share a peer constraint and must all be upgraded together
+- **Blocked Dependencies** — packages where the latest version requires a peer that no current release satisfies
+
+---
 
 ## REST API
 
-The `serve` command exposes a simple JSON API.
+The `serve` command exposes a JSON API on the configured port.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/scans` | List all scan runs (newest first) |
-| `GET` | `/api/scans/{id}` | Get a scan run and its full dependency report |
-| `POST` | `/api/scans` | Trigger a new scan (returns immediately with `202 Accepted`) |
-
-### Trigger a scan
+| `GET` | `/api/scans` | List all scan runs, newest first |
+| `GET` | `/api/scans/{id}` | Scan run metadata + full dependency report |
+| `POST` | `/api/scans` | Trigger a new async scan (returns `202 Accepted` immediately) |
 
 ```bash
-# Local path
-curl -X POST http://localhost:8080/api/scans \
+# Trigger a local scan
+curl -s -X POST http://localhost:8080/api/scans \
   -H 'Content-Type: application/json' \
-  -d '{"dir": "/path/to/repo"}'
+  -d '{"dir": "/path/to/project"}'
+# → {"id": 3, "status": "running"}
 
-# Remote git URL
-curl -X POST http://localhost:8080/api/scans \
+# Trigger a remote scan
+curl -s -X POST http://localhost:8080/api/scans \
   -H 'Content-Type: application/json' \
   -d '{"git_url": "https://github.com/org/repo"}'
+
+# Poll for completion
+curl -s http://localhost:8080/api/scans/3 | jq .status
+# "running" → "done" | "failed"
 ```
 
-Response: `{"id": 42, "status": "running"}`
-
-Poll `GET /api/scans/42` to check progress; `status` transitions from `running` → `done` (or `failed`).
-
-## Configuration
-
-All configuration is via environment variables — no config file required.
-
-| Variable | Required | Description |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | No | Enables AI-powered changelog summaries via the Anthropic API |
-| `GITHUB_TOKEN` | No | Auto-injected into HTTPS clone URLs for private repo scanning |
-| `DEP_HEALTH_ORG` | No | Organisation name for future multi-repo scanning |
-| `DEP_HEALTH_MAX_CONCURRENCY` | No | Max parallel registry requests (default: 10) |
-| `DEP_HEALTH_DB` | No | SQLite database path for the server (default: `dep-health.db`) |
+---
 
 ## Risk score formula
 
 ```
-score = (CVE severity   × 0.40)
-      + (version gap    × 0.30)
-      + (releases behind × 0.20)
+score = (CVE severity     × 0.40)
+      + (version gap      × 0.30)
+      + (releases behind  × 0.20)
       + (cross-repo count × 0.10)
 ```
 
-Each factor is normalised to 0–1 before weighting. The final score is multiplied by 100.
+Each factor normalised to 0–1 before weighting. Final score multiplied by 100.
 
-| Factor | Max input | Max contribution |
+| Factor | Scale | Max contribution |
 |---|---|---|
-| CVE severity | CRITICAL = 1.0, HIGH = 0.8, MEDIUM = 0.5, LOW = 0.2 | 40 pts |
-| Version gap | major = 1.0, minor = 0.5, patch = 0.1 | 30 pts |
+| CVE severity | CRITICAL=1.0, HIGH=0.8, MEDIUM=0.5, LOW=0.2 | 40 pts |
+| Version gap | major=1.0, minor=0.5, patch=0.1 | 30 pts |
 | Releases behind | ≥ 20 releases → 1.0 | 20 pts |
 | Cross-repo count | ≥ 10 repos → 1.0 | 10 pts |
 
+---
+
 ## Adding an ecosystem
 
-The `scanner.Scanner` interface has three methods:
+Implement the `Scanner` interface and register it in `DefaultScanners()`:
 
 ```go
-type Scanner interface {
-    Name()                                          string
-    Matches(path string)                            bool
-    Parse(path string, repoURL string) ([]models.Dependency, error)
-}
+type MyScanner struct{}
+
+func (s *MyScanner) Name() string              { return "myecosystem/manifest.ext" }
+func (s *MyScanner) Matches(path string) bool  { return filepath.Base(path) == "manifest.ext" }
+func (s *MyScanner) Parse(path, repoURL string) ([]models.Dependency, error) { … }
 ```
 
-Implement those three methods and add the scanner to `scanner.DefaultScanners()`. The resolver, scorer, and advisor pipeline picks it up automatically. You may also need a registry lookup branch in `resolver.resolveOne()` for the new ecosystem.
+Add a `case "myecosystem":` branch in `resolver.resolveOne()` pointing at the registry. The scorer, advisor, and pipeline pick everything else up automatically.
 
-See `scanner/gomod.go` for the Go module reference implementation.
+Reference implementations: `scanner/gomod.go` (Go), `scanner/pom.go` (XML + property resolution), `scanner/pyproject.go` (TOML + two format variants).
+
+---
 
 ## Project structure
 
 ```
 dep-health/
-├── main.go            ← entry point
-├── cmd/               ← cobra CLI (scan + serve subcommands)
-├── pipeline/          ← shared scan pipeline (clone → discover → enrich → score → advise)
-├── scanner/           ← manifest discovery and parsing (npm, Go modules)
-├── resolver/          ← version lookup (npm, Go proxy) + CVE checks (OSV.dev)
-├── scorer/            ← weighted risk formula + peer conflict detection
-├── advisor/           ← upgrade guidance (stub + Anthropic interface)
-├── store/             ← SQLite persistence (scan runs + dependency reports)
-├── server/            ← HTTP REST API + SPA handler
-├── web/               ← embedded frontend assets (go:embed)
-├── frontend/          ← Vite + React 18 dashboard source
+├── main.go                    entry point
+├── cmd/                       cobra CLI (scan + serve subcommands)
+├── config/                    env-var loader
+├── models/                    shared structs (Dependency → Enriched → Scored → Advisory)
+│
+├── scanner/                   manifest parsers
+│   ├── scanner.go             Scanner interface + Discover() + PackageJSONScanner
+│   ├── gomod.go               Go modules
+│   ├── requirements.go        Python requirements.txt
+│   ├── pyproject.go           Python pyproject.toml (PEP 621 + Poetry)
+│   ├── setupcfg.go            Python setup.cfg
+│   └── pom.go                 Java pom.xml
+│
+├── resolver/
+│   └── resolver.go            npm · Go proxy · PyPI · Maven Central · OSV.dev batch
+│
+├── scorer/
+│   ├── scorer.go              weighted risk formula
+│   └── conflicts.go           peer conflict + cascade group detection
+│
+├── advisor/
+│   ├── advisor.go             Advisor interface + StubAdvisor
+│   └── anthropic.go           AnthropicAdvisor (activated by ANTHROPIC_API_KEY)
+│
+├── pipeline/                  orchestrates all stages; handles git clone
+├── store/                     SQLite persistence
+├── server/                    HTTP REST API + SPA fallback
+├── web/                       go:embed wrapper for compiled frontend
+│
+├── frontend/                  Vite + React 18 dashboard source
 │   └── src/
-│       ├── pages/     ← ScanList, ScanDetail
-│       └── components/← RiskBadge, DepsTable, CascadePanel, BlockedPanel, …
-├── models/            ← shared structs with JSON tags
-└── config/            ← env-var configuration loader
+│       ├── pages/             ScanList, ScanDetail
+│       └── components/        DepsTable, CascadePanel, BlockedPanel, RiskBadge, …
+│
+└── testdata/                  fixture manifests for local testing and demos
+    ├── npm-only/              package.json
+    ├── python-only/           requirements.txt
+    ├── python-pyproject/      pyproject.toml (PEP 621)
+    ├── python-setupcfg/       setup.cfg
+    ├── java-maven/            pom.xml (Java 8 + Spring Boot 2.6 + log4j 2.14.1)
+    ├── mixed/                 package.json + requirements.txt + go.mod
+    ├── cascade/               npm peer-conflict scenario (React ecosystem)
+    └── no-deps/               empty manifests
 ```
-
-## Running tests
-
-```bash
-go test ./...                # all packages
-go test ./scanner/...        # manifest parsing
-go test ./resolver/...       # registry + OSV mock server tests
-go test ./scorer/...         # conflict detection + scoring
-```
-
-## Roadmap
-
-- [ ] `requirements.txt` scanner (PyPI)
-- [ ] `pom.xml` (Maven) scanner
-- [ ] Real Anthropic API advisor (changelog summarisation)
-- [ ] GitHub PR creation with migration guidance
-- [ ] Multi-repo scanning with cross-repo prevalence scoring
-- [ ] SARIF output for GitHub Advanced Security

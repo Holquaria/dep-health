@@ -15,8 +15,9 @@ latest published versions, checks for known CVEs via OSV.dev, and produces
 a risk-scored report with upgrade guidance.
 
 Subcommands:
-  scan   — analyse a local directory and print a ranked dependency table
-  serve  — start the HTTP server and React dashboard`,
+  scan        — analyse a local directory and print a ranked dependency table
+  scan-multi  — scan multiple repos and aggregate results with cross-repo scoring
+  serve       — start the HTTP server and React dashboard`,
 }
 
 // Execute is the main entry point called from main.go.
@@ -28,5 +29,6 @@ func Execute() {
 
 func init() {
 	rootCmd.AddCommand(scanCmd)
+	rootCmd.AddCommand(scanMultiCmd)
 	rootCmd.AddCommand(serveCmd)
 }

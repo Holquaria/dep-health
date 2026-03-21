@@ -33,6 +33,9 @@ func DefaultScanners() []Scanner {
 		&PackageJSONScanner{},
 		&GoModScanner{},
 		&RequirementsTxtScanner{},
+		&PyprojectScanner{},
+		&SetupCfgScanner{},
+		&PomScanner{},
 	}
 }
 

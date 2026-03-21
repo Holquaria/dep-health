@@ -2,9 +2,17 @@ import React from 'react'
 import RiskBadge from './RiskBadge.jsx'
 import { cascadeColor } from './cascadeColor.js'
 
-export default function DepsTable({ deps }) {
+export default function DepsTable({ deps, showRepo = false, repoFilter = null }) {
   if (!deps || deps.length === 0) {
     return <p className="empty">No dependencies recorded for this scan.</p>
+  }
+
+  const visible = repoFilter
+    ? deps.filter(d => d.repo_source === repoFilter)
+    : deps
+
+  if (visible.length === 0) {
+    return <p className="empty">No dependencies match the selected repo.</p>
   }
 
   return (
@@ -14,6 +22,7 @@ export default function DepsTable({ deps }) {
           <tr>
             <th style={{ width: 3, padding: 0 }} />
             <th>#</th>
+            {showRepo && <th>Repo</th>}
             <th>Package</th>
             <th>Current</th>
             <th>Latest</th>
@@ -26,7 +35,7 @@ export default function DepsTable({ deps }) {
           </tr>
         </thead>
         <tbody>
-          {deps.map((d, i) => {
+          {visible.map((d, i) => {
             const cveCount = d.vulnerabilities?.length ?? 0
             const severity = cveCount > 0 ? d.vulnerabilities[0].severity : null
             const isBlocked = d.blocked_by?.length > 0
@@ -34,17 +43,14 @@ export default function DepsTable({ deps }) {
             const color = isCascade ? cascadeColor(d.cascade_group) : null
 
             return (
-              <tr key={`${d.name}-${i}`}>
-                {/* Colored left-edge stripe — same color for all members of a cascade group */}
-                <td
-                  style={{
-                    width: 3,
-                    padding: 0,
-                    background: color ?? 'transparent',
-                    borderBottom: 'none',
-                  }}
-                />
+              <tr key={`${d.name}-${d.repo_source}-${i}`}>
+                <td style={{ width: 3, padding: 0, background: color ?? 'transparent', borderBottom: 'none' }} />
                 <td className="text-muted">{i + 1}</td>
+                {showRepo && (
+                  <td className="monospace text-muted" style={{ whiteSpace: 'nowrap' }}>
+                    {d.repo_source || '—'}
+                  </td>
+                )}
                 <td>
                   <strong>{d.name}</strong>
                   <br />
@@ -65,14 +71,7 @@ export default function DepsTable({ deps }) {
                   {isBlocked ? (
                     <span className="badge badge-high">BLOCKED</span>
                   ) : isCascade ? (
-                    <span
-                      className="badge"
-                      style={{
-                        background: `${color}22`,
-                        color,
-                        border: `1px solid ${color}55`,
-                      }}
-                    >
+                    <span className="badge" style={{ background: `${color}22`, color, border: `1px solid ${color}55` }}>
                       CASCADE
                     </span>
                   ) : '—'}

@@ -36,6 +36,9 @@ type ScoredDependency struct {
 	EnrichedDependency
 	RiskScore      float64  `json:"risk_score"`
 	CrossRepoCount int      `json:"cross_repo_count"`
+	// RepoSource identifies which repository this dependency came from.
+	// Set by pipeline.RunMulti; empty in single-repo scans.
+	RepoSource     string   `json:"repo_source,omitempty"`
 	Reasons        []string `json:"reasons"`
 	// BlockedBy lists peer packages whose *latest* version still cannot satisfy
 	// this package's peer constraint — meaning this upgrade has no safe path yet.
@@ -54,3 +57,21 @@ type AdvisoryReport struct {
 	PRUrl           string   `json:"pr_url,omitempty"`
 }
 
+// MultiRepoReport is returned by pipeline.RunMulti and contains the aggregated
+// results of scanning multiple repositories.
+type MultiRepoReport struct {
+	Targets []string                    `json:"targets"`
+	PerRepo map[string][]AdvisoryReport `json:"per_repo"`
+	AllDeps []AdvisoryReport            `json:"all_deps"`
+	Stats   MultiRepoStats              `json:"stats"`
+	Errors  map[string]string           `json:"errors,omitempty"`
+}
+
+// MultiRepoStats holds aggregate statistics for a multi-repo scan.
+type MultiRepoStats struct {
+	TotalRepos    int `json:"total_repos"`
+	TotalOutdated int `json:"total_outdated"`
+	TotalCVEs     int `json:"total_cves"`
+	CascadeGroups int `json:"cascade_groups"`
+	BlockedDeps   int `json:"blocked_deps"`
+}

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"dep-health/pipeline"
@@ -44,6 +45,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/scans", s.listScans)
 	s.mux.HandleFunc("GET /api/scans/{id}", s.getScan)
 	s.mux.HandleFunc("POST /api/scans", s.triggerScan)
+	s.mux.HandleFunc("POST /api/scans/multi", s.triggerMultiScan)
 
 	// SPA fallback — all other requests serve the React app.
 	s.mux.Handle("/", spaHandler())
@@ -91,6 +93,13 @@ func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Auto-promote URL-shaped dir values to git_url so that users who paste a
+	// remote URL into the "local path" field still get a clone-based scan.
+	if req.GitURL == "" && looksLikeGitURL(req.Dir) {
+		req.GitURL = req.Dir
+		req.Dir = ""
+	}
+
 	// For remote scans, store the git URL as the repo URL when not explicitly set.
 	if req.RepoURL == "" && req.GitURL != "" {
 		req.RepoURL = req.GitURL
@@ -135,6 +144,70 @@ func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]any{"id": runID, "status": "running"}) //nolint:errcheck
+}
+
+type multiTriggerRequest struct {
+	Targets []string `json:"targets"`
+}
+
+func (s *Server) triggerMultiScan(w http.ResponseWriter, r *http.Request) {
+	var req multiTriggerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, fmt.Errorf("invalid request body"), http.StatusBadRequest)
+		return
+	}
+	if len(req.Targets) < 2 {
+		jsonError(w, fmt.Errorf("targets must contain at least 2 entries"), http.StatusBadRequest)
+		return
+	}
+
+	// Auto-promote URL-shaped entries (same logic as single-scan).
+	for i, t := range req.Targets {
+		if looksLikeGitURL(t) {
+			req.Targets[i] = t // already a git URL
+		}
+	}
+
+	runID, err := s.store.CreateMultiScanRun(req.Targets)
+	if err != nil {
+		jsonError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.inflight[runID] = cancel
+	s.mu.Unlock()
+
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.inflight, runID)
+			s.mu.Unlock()
+			cancel()
+		}()
+
+		report, scanErr := pipeline.RunMulti(ctx, req.Targets, pipeline.Options{})
+		if err := s.store.FinishScanRun(runID, scanErr); err != nil {
+			return
+		}
+		if scanErr == nil && report != nil && len(report.AllDeps) > 0 {
+			s.store.SaveDeps(runID, report.AllDeps) //nolint:errcheck
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]any{"id": runID, "status": "running"}) //nolint:errcheck
+}
+
+// looksLikeGitURL returns true when s looks like a remote repository URL rather
+// than a local filesystem path.  Used to auto-promote mis-filed dir values.
+func looksLikeGitURL(s string) bool {
+	return strings.HasPrefix(s, "https://") ||
+		strings.HasPrefix(s, "http://") ||
+		strings.HasPrefix(s, "git@") ||
+		strings.HasPrefix(s, "git://")
 }
 
 // ── SPA handler ───────────────────────────────────────────────────────────────
