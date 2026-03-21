@@ -1,0 +1,15 @@
+# Build output
+dep-health
+web/dist/*
+!web/dist/.gitkeep
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Node
+frontend/node_modules/
+
+# Go test cache
+*.test
