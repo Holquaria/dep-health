@@ -160,15 +160,19 @@ classDiagram
 
     class EnrichedDependency {
         +string LatestVersion
+        +string LatestInMajor
         +string SeverityGap
         +int VersionsBehind
         +[]Vulnerability Vulnerabilities
         +map[string]string PeerConstraints
+        +string License
+        +string LicenseRisk
     }
 
     class ScoredDependency {
         +float64 RiskScore
         +int CrossRepoCount
+        +string RepoSource
         +[]string Reasons
         +[]string BlockedBy
         +string CascadeGroup
@@ -190,6 +194,10 @@ classDiagram
 **Embedding chain:** `Dependency` → `EnrichedDependency` → `ScoredDependency` → `AdvisoryReport`
 
 `PeerConstraints` is populated for npm packages and maps peer package names to the semver constraint declared by the package's *latest* version (e.g. `{"react": "^19.0.0"}`). It drives conflict detection in the scorer.
+
+`LatestInMajor` is the newest version sharing the same major line as `CurrentVersion`. When it differs from `LatestVersion`, the package has a newer major line available — this signals an LTS-style situation where the user may choose to stay on their current major.
+
+`License` holds the SPDX identifier (e.g. `"MIT"`, `"Apache-2.0"`). `LicenseRisk` classifies it as `"permissive"`, `"copyleft"`, `"unknown"`, or `"none"`.
 
 ---
 
@@ -328,7 +336,7 @@ sequenceDiagram
 
 ### Risk formula
 
-Each dependency is scored across four independent signals.
+Each dependency is scored across four independent signals. An LTS-aware gap factor adjusts the version-gap weight when the user is current within their major line but a newer major exists.
 
 ```mermaid
 flowchart LR
@@ -341,7 +349,7 @@ flowchart LR
 
     subgraph factors ["Factor calculation (each → 0.0 – 1.0)"]
         F1["CVE severity factor\nCRITICAL=1.0 HIGH=0.8\nMEDIUM=0.5 LOW=0.2"]
-        F2["Version gap factor\nmajor=1.0 minor=0.5 patch=0.1"]
+        F2["Version gap factor\nmajor=1.0 minor=0.5 patch=0.1\n× ltsAwareGapFactor()"]
         F3["Versions-behind factor\nbehind / 20  (capped at 1.0)"]
         F4["Cross-repo factor\ncount / 10  (capped at 1.0)"]
     end
@@ -354,6 +362,8 @@ flowchart LR
     W1 & W2 & W3 & W4 --> SUM["sum × 100"]
     SUM --> score(["RiskScore 0–100"])
 ```
+
+**LTS-aware gap factor:** when `LatestInMajor != LatestVersion` and the user is current on their major line (`CurrentVersion == LatestInMajor`), the gap factor is reduced to 0.3 (low urgency — new major exists but current major is up to date). When the user is behind within their own major *and* a new major exists, the factor remains 1.0 (full urgency).
 
 | Score | Band | Colour | Typical profile |
 |---|---|---|---|
@@ -474,8 +484,11 @@ flowchart TD
 erDiagram
     scan_runs {
         int     id          PK
+        text    session_id  "anonymous session UUID"
         text    dir
         text    repo_url
+        int     is_multi    "0 or 1"
+        text    targets     "JSON array"
         text    status      "pending | running | done | failed"
         text    started_at
         text    finished_at
@@ -490,6 +503,7 @@ erDiagram
         text    manifest_path
         text    current_ver
         text    latest_ver
+        text    latest_in_major
         text    severity_gap
         int     versions_behind
         real    risk_score
@@ -501,12 +515,18 @@ erDiagram
         text    summary
         text    breaking_changes "JSON array"
         text    migration_steps  "JSON array"
+        text    repo_source
+        int     cross_repo_count
+        text    license
+        text    license_risk
     }
 
     scan_runs ||--o{ scan_deps : "has"
 ```
 
 Array and object fields are stored as JSON strings and unmarshalled on read.
+
+All queries filter by `session_id` — users can only see their own scans.
 
 ### Lifecycle
 
@@ -516,7 +536,7 @@ sequenceDiagram
     participant store as store.Store
     participant pipeline as pipeline.Run
 
-    server->>store: CreateScanRun(dir, repoURL) → runID
+    server->>store: CreateScanRun(dir, repoURL, sessionID) → runID
     server->>pipeline: Run(ctx, dir, opts) [goroutine]
     pipeline-->>server: reports, err
     server->>store: FinishScanRun(runID, err)
@@ -531,13 +551,30 @@ On startup, `RecoverStuckScans()` marks any runs still in `running` or `pending`
 
 ## 10. Server and dashboard
 
+### Session middleware
+
+All `/api/` routes are wrapped with `sessionMiddleware` (defined in `server/session.go`). On first request, a random UUID v4 cookie (`dep_health_session`, HttpOnly, SameSite=Lax, 90-day MaxAge) is generated and set. Subsequent requests include the cookie — no new cookie is issued.
+
+The session ID is injected into the request context and extracted by handlers via `sessionID(r)`. Every store call (`CreateScanRun`, `ListScans`, `GetScan`) receives the session ID, ensuring users can only see their own scans.
+
+```mermaid
+flowchart LR
+    req([HTTP request]) --> M{Has session cookie?}
+    M -- yes --> C[Extract session ID]
+    M -- no --> N[Generate UUID v4\nSet-Cookie]
+    N --> C
+    C --> D[context.WithValue]
+    D --> H[API handler]
+```
+
 ### HTTP routes
 
 | Method | Path | Handler |
 |---|---|---|
-| `GET` | `/api/scans` | `listScans` — returns `[]store.ScanRun` |
-| `GET` | `/api/scans/{id}` | `getScan` — returns `{run, deps}` |
+| `GET` | `/api/scans` | `listScans` — returns `[]store.ScanRun` (filtered by session) |
+| `GET` | `/api/scans/{id}` | `getScan` — returns `{run, deps}` (404 if wrong session) |
 | `POST` | `/api/scans` | `triggerScan` — 202 Accepted, scan runs in goroutine |
+| `POST` | `/api/scans/multi` | `triggerMultiScan` — 202 Accepted, multi-repo scan |
 | `*` | `/*` | `spaHandler` — serves embedded React app, falls back to `index.html` |
 
 ### SPA fallback

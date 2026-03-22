@@ -52,7 +52,7 @@ One-command startup: `./serve.sh` (builds frontend, compiles binary, starts serv
 ### Models (`models/models.go`)
 
 - [x] `Dependency` struct (Name, CurrentVersion, Ecosystem, ManifestPath, RepoURL)
-- [x] `EnrichedDependency` struct (embeds Dependency + LatestVersion, SeverityGap, VersionsBehind, Vulnerabilities, PeerConstraints, **License**, **LicenseRisk**)
+- [x] `EnrichedDependency` struct (embeds Dependency + LatestVersion, **LatestInMajor**, SeverityGap, VersionsBehind, Vulnerabilities, PeerConstraints, **License**, **LicenseRisk**)
 - [x] `Vulnerability` struct (ID, Severity, Summary, URL)
 - [x] `ScoredDependency` struct (embeds EnrichedDependency + RiskScore, CrossRepoCount, **RepoSource**, Reasons, BlockedBy, CascadeGroup)
 - [x] `AdvisoryReport` struct (embeds ScoredDependency + Summary, BreakingChanges, MigrationSteps, PRUrl)
@@ -74,10 +74,10 @@ One-command startup: `./serve.sh` (builds frontend, compiles binary, starts serv
 
 ### Resolver (`resolver/resolver.go`)
 
-- [x] npm registry lookup — `registry.npmjs.org/{pkg}`, `dist-tags.latest`, peer constraints, **license extraction** (`versions[latest].license`, handles string or `{type}` object)
-- [x] Go module proxy — `proxy.golang.org/{module}/@latest` + `@v/list`; license set to `"unknown"` (proxy API has no license data; future: GitHub API or licensecheck)
-- [x] PyPI JSON API — `pypi.org/pypi/{pkg}/json`, pre-releases excluded from versions-behind count; **license extraction** prefers `info.classifiers` (`License :: OSI Approved :: ...`), falls back to `info.license` (truncated if free-text)
-- [x] Maven Central search API — `search.maven.org/solrsearch/select`, `g:{g}+AND+a:{a}`, `core=gav` for version list; license set to `"unknown"` (TODO: fetch POM `<licenses>` element)
+- [x] npm registry lookup — `registry.npmjs.org/{pkg}`, `dist-tags.latest`, peer constraints, **license extraction** (`versions[latest].license`, handles string or `{type}` object), **`findLatestInMajor()`**
+- [x] Go module proxy — `proxy.golang.org/{module}/@latest` + `@v/list`; license set to `"unknown"` (proxy API has no license data; future: GitHub API or licensecheck); **`findLatestInMajor()`**
+- [x] PyPI JSON API — `pypi.org/pypi/{pkg}/json`, pre-releases excluded from versions-behind count; **license extraction** prefers `info.classifiers` (`License :: OSI Approved :: ...`), falls back to `info.license` (truncated if free-text); **`findLatestInMajor()`**
+- [x] Maven Central search API — `search.maven.org/solrsearch/select`, `g:{g}+AND+a:{a}`, `core=gav` for version list; license set to `"unknown"` (TODO: fetch POM `<licenses>` element); **`findLatestInMajor()`**
 - [x] OSV.dev batch API — single `POST /v1/querybatch` for all packages; ecosystem mapping: npm→npm, pypi→PyPI, go→Go, maven→Maven
 - [x] Peer constraint extraction — `versions[latest].peerDependencies` → `PeerConstraints map[string]string`
 - [x] **`classifyLicense(string) string`** — MIT/Apache/BSD/ISC/Unlicense → `"permissive"`, GPL/AGPL/LGPL/MPL → `"copyleft"`, empty → `"none"`, unrecognised → `"unknown"`
@@ -88,6 +88,7 @@ One-command startup: `./serve.sh` (builds frontend, compiles binary, starts serv
 ### Scorer (`scorer/`)
 
 - [x] Weighted risk formula — CVE severity 40%, version gap 30%, versions-behind 20%, cross-repo count 10%
+- [x] **LTS-aware gap factor** — `ltsAwareGapFactor()` reduces version-gap urgency to 0.3 when current major is up to date but newer major exists
 - [x] Peer conflict detection — semver constraint checking via `Masterminds/semver/v3`
 - [x] Cascade group assignment — union-find, lexicographic root for determinism
 - [x] `BlockedBy` detection — set when peer's latest can't satisfy the constraint
@@ -97,10 +98,31 @@ One-command startup: `./serve.sh` (builds frontend, compiles binary, starts serv
 ### Advisor (`advisor/`)
 
 - [x] `Advisor` interface — `Advise(ctx, ScoredDependency) (AdvisoryReport, error)`
-- [x] `StubAdvisor` — deterministic summary + breaking-change warnings + ecosystem migration steps (npm/pypi/go/maven)
-- [x] `AnthropicAdvisor` — `advisor/anthropic.go`, forced `record_advisory` tool call for structured JSON output, activated via `ANTHROPIC_API_KEY`, falls back to stub on any error
+- [x] `StubAdvisor` — deterministic summary + breaking-change warnings + ecosystem migration steps (npm/pypi/go/maven); **two-phase upgrade for cross-major bumps**
+- [x] `AnthropicAdvisor` — `advisor/anthropic.go`, forced `record_advisory` tool call for structured JSON output, activated via `ANTHROPIC_API_KEY`, falls back to stub on any error; **prompt enriched with LTS/major-line context**
 - [x] Tests — `advisor_test.go`, 8 cases (summary content, major/minor breaking changes, NPM/PyPI/Go ecosystem steps, CVE step, determinism, embedded dep)
 - [ ] Changelog fetching — GitHub Releases API / CHANGELOG.md scraping (not started)
+
+### LTS-aware versioning
+
+- [x] `LatestInMajor string` field on `EnrichedDependency` — newest version within the same major line as current
+- [x] `findLatestInMajor()` + `parseSemverKeys()` helpers in `resolver/resolver.go` — wired into all 4 ecosystem resolvers
+- [x] `ltsAwareGapFactor()` in `scorer/scorer.go` — reduces gap urgency when current major is up to date
+- [x] `hasSeparateMajorLine()` in `advisor/advisor.go` — detects when LatestInMajor differs from LatestVersion
+- [x] Two-phase `buildMigrationSteps()` in `advisor/advisor.go` — Phase 1: upgrade within current major; Phase 2: plan cross-major migration
+- [x] Anthropic advisor prompt enriched with major-line context
+- [x] "Major Latest" column in CLI table output (shown only when it differs from Latest)
+- [x] `latest_in_major` column in `scan_deps` store table
+
+### Session isolation
+
+- [x] `server/session.go` — `sessionMiddleware`, `sessionID()`, `newSessionID()` (crypto/rand UUID v4)
+- [x] Cookie: `dep_health_session`, HttpOnly, SameSite=Lax, Path=/, 90-day MaxAge
+- [x] All `/api/` routes wrapped with `sessionMiddleware` via nested mux
+- [x] `session_id` column on `scan_runs` table (additive migration)
+- [x] All store methods accept `sessionID` parameter; queries filter by `session_id`
+- [x] Server tests: cookie set on first request, preserved on subsequent, cross-session isolation
+- [x] Store tests: `TestSessionIsolation_ListScans`, `TestSessionIsolation_GetScan`
 
 ### License risk signal (session 6)
 
@@ -153,24 +175,30 @@ One-command startup: `./serve.sh` (builds frontend, compiles binary, starts serv
 - [x] SQLite via `modernc.org/sqlite` (pure Go, no CGo)
 - [x] `scan_runs` table — id, dir, repo_url, status, started_at, finished_at, error
 - [x] `scan_deps` table — full `AdvisoryReport` fields, JSON columns for arrays/maps
-- [x] `CreateScanRun`, `FinishScanRun`, `SaveDeps`, `ListScans`, `GetScan`
+- [x] `CreateScanRun`, `FinishScanRun`, `SaveDeps`, `ListScans`, `GetScan` — all accept `sessionID`
 - [x] `RecoverStuckScans` — marks interrupted runs as failed on startup
 - [x] WAL mode + foreign keys enabled
-- [x] `is_multi` + `targets` columns on `scan_runs` — `CreateMultiScanRun(targets []string)` stores JSON-encoded target list, `dir="N repos"`
+- [x] `is_multi` + `targets` columns on `scan_runs` — `CreateMultiScanRun(targets []string, sessionID)` stores JSON-encoded target list, `dir="N repos"`
 - [x] `repo_source` + `cross_repo_count` columns on `scan_deps` — populated by multi-repo scans
+- [x] **`session_id` column on `scan_runs`** — all queries filter by session; `ListScans(sessionID)` and `GetScan(id, sessionID)` enforce isolation
+- [x] **`latest_in_major` column on `scan_deps`** — LTS-aware versioning data
 - [x] **`license` + `license_risk` columns on `scan_deps`** — additive migration, wired into `SaveDeps` and `GetScan`
 - [x] Additive `ALTER TABLE ADD COLUMN` migrations — safe against existing databases (duplicate-column-name errors suppressed)
+- [x] Tests — session isolation for ListScans and GetScan (cross-session access returns error)
 
-### Server (`server/server.go`)
+### Server (`server/server.go` + `server/session.go`)
 
 - [x] Go 1.22 `ServeMux` with `{id}` path parameters
-- [x] `GET /api/scans` — list all runs
-- [x] `GET /api/scans/{id}` — run + full dep report
+- [x] `GET /api/scans` — list runs (filtered by session)
+- [x] `GET /api/scans/{id}` — run + full dep report (404 if wrong session)
 - [x] `POST /api/scans` — async trigger (202 Accepted), accepts `dir` or `git_url`
+- [x] `POST /api/scans/multi` — async multi-repo trigger (202 Accepted), accepts `{"targets": [...]}`, requires ≥2 entries
 - [x] SPA fallback — serves `dist/index.html` for unmatched routes
 - [x] In-flight scan tracking with `context.CancelFunc` map
 - [x] `looksLikeGitURL()` auto-promotion — if `dir` looks like a remote URL (`https://`, `http://`, `git@`, `git://`) and `git_url` is unset, silently promotes to git clone path
-- [x] `POST /api/scans/multi` — async multi-repo trigger (202 Accepted), accepts `{"targets": [...]}`, requires ≥2 entries
+- [x] **Anonymous session middleware** — `sessionMiddleware` wraps all `/api/` routes; generates UUID v4 cookie (`dep_health_session`, HttpOnly, SameSite=Lax, 90-day MaxAge) on first request
+- [x] **Session isolation** — all store calls receive `sessionID(r)`; users can only list/view their own scans
+- [x] Tests — session cookie set on first request, cookie preserved on subsequent requests, cross-session scan isolation
 
 ### Frontend (`frontend/src/`)
 
@@ -257,6 +285,7 @@ Packages:   models ← scanner, resolver, scorer, advisor
 | `pipeline/multi.go` | `RunMulti`, `TargetLabel`, cross-repo score aggregation |
 | `store/store.go` | SQLite persistence |
 | `server/server.go` | REST API + SPA handler + URL auto-promotion |
+| `server/session.go` | Anonymous session middleware + UUID generation |
 | `cmd/scan.go` | CLI scan subcommand |
 | `cmd/scan_multi.go` | CLI scan-multi subcommand |
 | `cmd/serve.go` | CLI serve subcommand |

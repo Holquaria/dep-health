@@ -31,11 +31,14 @@ A CLI tool and web dashboard that scans repositories for outdated dependencies, 
 - **Remote scanning** — `--git-url` clones any repo with `--depth 1` then removes the clone
 - **CVE detection** — single batch query to [OSV.dev](https://osv.dev) for all discovered packages
 - **Registry resolution** — npm registry, Go module proxy, PyPI JSON API, Maven Central search API
+- **LTS-aware versioning** — tracks `LatestInMajor` alongside absolute latest; scoring reduces urgency when current major is up to date
 - **Risk scoring** — weighted formula across CVE severity, version gap, release count, cross-repo prevalence
 - **Peer conflict detection** — cascade groups (must upgrade together) and blocked upgrades
-- **Upgrade guidance** — ecosystem-specific migration steps and breaking-change warnings
+- **License detection** — SPDX license extraction from npm/PyPI registries with permissive/copyleft/unknown classification
+- **Upgrade guidance** — ecosystem-specific migration steps and breaking-change warnings; two-phase upgrade for cross-major bumps
 - **AI advisor** — optional Anthropic API integration for richer changelog summaries (set `ANTHROPIC_API_KEY`)
-- **Web dashboard** — React SPA with real-time scan progress, dep table, cascade panel, migration hints
+- **Web dashboard** — React SPA with real-time scan progress, dep table, cascade panel, migration hints, license badges
+- **Anonymous sessions** — cookie-based session isolation; each browser gets its own scan history with no login required
 - **SQLite persistence** — scan history survives server restarts
 - **JSON output** — `--json` flag for CI pipeline consumption
 
@@ -217,6 +220,7 @@ Either `directory` or `--git-url` must be provided.
 | **Package** | Name as in the manifest; Maven uses `groupId:artifactId` |
 | **Current** | Version pinned in the manifest (range operators stripped) |
 | **Latest** | Latest stable release from the registry |
+| **Major Latest** | Newest version within the same major line (shown only when it differs from Latest) |
 | **Gap** | `patch` / `minor` / `major` — semver distance class |
 | **Behind** | Published releases between current and latest |
 | **CVEs** | Count of known vulnerabilities from OSV.dev |
@@ -238,24 +242,27 @@ The `serve` command exposes a JSON API on the configured port.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/scans` | List all scan runs, newest first |
-| `GET` | `/api/scans/{id}` | Scan run metadata + full dependency report |
+| `GET` | `/api/scans` | List scan runs for the current session, newest first |
+| `GET` | `/api/scans/{id}` | Scan run metadata + full dependency report (404 if not your session) |
 | `POST` | `/api/scans` | Trigger a new async scan (returns `202 Accepted` immediately) |
+| `POST` | `/api/scans/multi` | Trigger a multi-repo scan (`{"targets": ["url1", "url2"]}`, min 2) |
+
+All API routes set a `dep_health_session` cookie on first request. Each browser session sees only its own scans — no login required.
 
 ```bash
 # Trigger a local scan
-curl -s -X POST http://localhost:8080/api/scans \
+curl -s -c cookies.txt -X POST http://localhost:8080/api/scans \
   -H 'Content-Type: application/json' \
   -d '{"dir": "/path/to/project"}'
 # → {"id": 3, "status": "running"}
 
 # Trigger a remote scan
-curl -s -X POST http://localhost:8080/api/scans \
+curl -s -b cookies.txt -X POST http://localhost:8080/api/scans \
   -H 'Content-Type: application/json' \
   -d '{"git_url": "https://github.com/org/repo"}'
 
-# Poll for completion
-curl -s http://localhost:8080/api/scans/3 | jq .status
+# Poll for completion (use same cookie jar to stay in session)
+curl -s -b cookies.txt http://localhost:8080/api/scans/3 | jq .status
 # "running" → "done" | "failed"
 ```
 
@@ -265,12 +272,12 @@ curl -s http://localhost:8080/api/scans/3 | jq .status
 
 ```
 score = (CVE severity     × 0.40)
-      + (version gap      × 0.30)
+      + (version gap      × 0.30 × ltsAwareFactor)
       + (releases behind  × 0.20)
       + (cross-repo count × 0.10)
 ```
 
-Each factor normalised to 0–1 before weighting. Final score multiplied by 100.
+Each factor normalised to 0–1 before weighting. Final score multiplied by 100. The `ltsAwareFactor` reduces version-gap urgency to 0.3 when the user is current within their major line but a newer major exists (LTS scenario).
 
 | Factor | Scale | Max contribution |
 |---|---|---|
