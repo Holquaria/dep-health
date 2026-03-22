@@ -27,7 +27,7 @@ func (s *PyprojectScanner) Matches(path string) bool {
 // Fields we don't need are ignored by the TOML decoder.
 type pyprojectTOML struct {
 	Project struct {
-		Dependencies        []string            `toml:"dependencies"`
+		Dependencies         []string            `toml:"dependencies"`
 		OptionalDependencies map[string][]string `toml:"optional-dependencies"`
 	} `toml:"project"`
 

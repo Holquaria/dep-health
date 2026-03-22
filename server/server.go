@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -137,13 +138,13 @@ func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if scanErr == nil && len(reports) > 0 {
-			s.store.SaveDeps(runID, reports) //nolint:errcheck
+			if err := s.store.SaveDeps(runID, reports); err != nil {
+				log.Printf("server: save deps for run %d: %v", runID, err)
+			}
 		}
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]any{"id": runID, "status": "running"}) //nolint:errcheck
+	jsonOK202(w, map[string]any{"id": runID, "status": "running"})
 }
 
 type multiTriggerRequest struct {
@@ -192,13 +193,13 @@ func (s *Server) triggerMultiScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if scanErr == nil && report != nil && len(report.AllDeps) > 0 {
-			s.store.SaveDeps(runID, report.AllDeps) //nolint:errcheck
+			if err := s.store.SaveDeps(runID, report.AllDeps); err != nil {
+				log.Printf("server: save deps for multi run %d: %v", runID, err)
+			}
 		}
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]any{"id": runID, "status": "running"}) //nolint:errcheck
+	jsonOK202(w, map[string]any{"id": runID, "status": "running"})
 }
 
 // looksLikeGitURL returns true when s looks like a remote repository URL rather
@@ -245,13 +246,26 @@ func spaHandler() http.Handler {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func jsonOK(w http.ResponseWriter, v any) {
+func jsonOK202(w http.ResponseWriter, v any) {
+	b, _ := json.Marshal(v) // v is always a simple map literal — marshal cannot fail
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v) //nolint:errcheck
+	w.WriteHeader(http.StatusAccepted)
+	w.Write(b) //nolint:errcheck // write errors are unactionable once response has started
+}
+
+func jsonOK(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(b) //nolint:errcheck // write errors are unactionable once response has started
 }
 
 func jsonError(w http.ResponseWriter, err error, code int) {
+	b, _ := json.Marshal(map[string]string{"error": err.Error()})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}) //nolint:errcheck
+	w.Write(b) //nolint:errcheck // write errors are unactionable once response has started
 }

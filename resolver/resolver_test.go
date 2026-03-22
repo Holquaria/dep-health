@@ -18,8 +18,8 @@ func mockNPMResponse(latest string, versions map[string]map[string]string) []byt
 		PeerDependencies map[string]string `json:"peerDependencies,omitempty"`
 	}
 	type payload struct {
-		DistTags map[string]string       `json:"dist-tags"`
-		Versions map[string]versionMeta  `json:"versions"`
+		DistTags map[string]string      `json:"dist-tags"`
+		Versions map[string]versionMeta `json:"versions"`
 	}
 	p := payload{
 		DistTags: map[string]string{"latest": latest},

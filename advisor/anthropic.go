@@ -27,14 +27,14 @@ type AnthropicAdvisor struct {
 	client anthropic.Client
 }
 
-// NewAnthropic creates an AnthropicAdvisor. Panics if apiKey is empty.
-func NewAnthropic(apiKey string) *AnthropicAdvisor {
+// NewAnthropic creates an AnthropicAdvisor. Returns an error if apiKey is empty.
+func NewAnthropic(apiKey string) (*AnthropicAdvisor, error) {
 	if apiKey == "" {
-		panic("advisor: ANTHROPIC_API_KEY must not be empty")
+		return nil, fmt.Errorf("advisor: ANTHROPIC_API_KEY must not be empty")
 	}
 	return &AnthropicAdvisor{
 		client: anthropic.NewClient(option.WithAPIKey(apiKey)),
-	}
+	}, nil
 }
 
 // advisoryOutput matches the tool input schema defined in Advise.

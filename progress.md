@@ -99,12 +99,15 @@ All tests pass: `go test ./...`
 - [x] Tests — `advisor_test.go`, 8 cases (summary content, major/minor breaking changes, NPM/PyPI/Go ecosystem steps, CVE step, determinism, embedded dep)
 - [ ] Changelog fetching — GitHub Releases API / CHANGELOG.md scraping (not started)
 
-### Pipeline (`pipeline/pipeline.go`)
+### Pipeline (`pipeline/pipeline.go` + `pipeline/multi.go`)
 
 - [x] `pipeline.Run()` — single entry point used by both CLI and server
 - [x] `Options.GitURL` — clones repo to temp dir before scanning, injects `GITHUB_TOKEN` for HTTPS
 - [x] `Options.OnProgress` — progress callback (CLI prints to stderr, server passes nil)
 - [x] Temp dir cleanup via `defer os.RemoveAll`
+- [x] `pipeline.RunMulti()` — multi-repo aggregation; calls `Run()` per target concurrently, merges `AllDeps`, computes cross-repo counts, re-sorts by updated score, accumulates `Errors` map
+- [x] `TargetLabel(target string) string` — exported helper: git URLs → `"org/repo"`, local paths → `"basename"`; used by both CLI and store as the `RepoSource` key
+- [x] Cross-repo scoring — after merge, deps sharing `(name, ecosystem)` across N repos get `min(N/10, 1.0) * 10.0` pts added to their existing score
 
 ### CLI (`cmd/`)
 
@@ -116,6 +119,7 @@ All tests pass: `go test ./...`
 - [x] Blocked dependency section below table
 - [x] Migration hints for top 3 packages
 - [x] `--json` flag — emits `[]AdvisoryReport` as indented JSON
+- [x] `scan-multi <target> <target> [...]` subcommand — requires ≥2 targets (local paths or git URLs), prints aggregate summary line + per-repo breakdown table, `--json` emits full `MultiRepoReport`
 
 ### Store (`store/store.go`)
 
@@ -125,6 +129,9 @@ All tests pass: `go test ./...`
 - [x] `CreateScanRun`, `FinishScanRun`, `SaveDeps`, `ListScans`, `GetScan`
 - [x] `RecoverStuckScans` — marks interrupted runs as failed on startup
 - [x] WAL mode + foreign keys enabled
+- [x] `is_multi` + `targets` columns on `scan_runs` — `CreateMultiScanRun(targets []string)` stores JSON-encoded target list, `dir="N repos"`
+- [x] `repo_source` + `cross_repo_count` columns on `scan_deps` — populated by multi-repo scans
+- [x] Additive `ALTER TABLE ADD COLUMN` migrations — safe against existing databases (duplicate-column-name errors suppressed)
 
 ### Server (`server/server.go`)
 
@@ -135,12 +142,13 @@ All tests pass: `go test ./...`
 - [x] SPA fallback — serves `dist/index.html` for unmatched routes
 - [x] In-flight scan tracking with `context.CancelFunc` map
 - [x] `looksLikeGitURL()` auto-promotion — if `dir` looks like a remote URL (`https://`, `http://`, `git@`, `git://`) and `git_url` is unset, silently promotes to git clone path
+- [x] `POST /api/scans/multi` — async multi-repo trigger (202 Accepted), accepts `{"targets": [...]}`, requires ≥2 entries
 
 ### Frontend (`frontend/src/`)
 
 - [x] Vite + React 18 + React Router v6
 - [x] Embedded into binary via `//go:embed dist` (`web/embed.go`)
-- [x] `ScanList` page — trigger form (local/remote toggle), scan history table, auto-polls while running
+- [x] `ScanList` page — trigger form (local/remote/multi toggle), scan history table, auto-polls while running
 - [x] `ScanDetail` page — run metadata, deps table, migration hints, cascade + blocked panels
 - [x] `DepsTable` — colored left-border stripe per cascade group, CASCADE/BLOCKED badges
 - [x] `CascadePanel` — matching group colors, dot indicators
@@ -150,6 +158,9 @@ All tests pass: `go test ./...`
 - [x] Dark theme CSS design system
 - [x] Deterministic cascade group → color mapping (hash → 6-color palette)
 - [x] Auto-detect URL pasted into local path field — switches to "Git URL" mode automatically
+- [x] Multi-repo mode in `ScanList` — dynamic list of target inputs, `+Add another` / `✕` remove, submits to `POST /api/scans/multi`
+- [x] Multi-repo history rows — show `"N repos (target1, target2, ...)"` label and `MULTI-REPO` badge
+- [x] Multi-repo `ScanDetail` — aggregate stats card (repos, outdated deps, CVEs, cascade groups, blocked), repo filter buttons, `Repo` column in `DepsTable`, `computeStats()` derived client-side from deps
 
 ### Test fixtures (`testdata/`)
 
@@ -172,8 +183,9 @@ All tests pass: `go test ./...`
 ```
 main.go
 └── cmd/
-    ├── scan     → pipeline.Run() → prints table
-    └── serve    → server.New(store) → http.ListenAndServe
+    ├── scan       → pipeline.Run()      → prints table
+    ├── scan-multi → pipeline.RunMulti() → prints aggregate + per-repo table
+    └── serve      → server.New(store)   → http.ListenAndServe
 
 pipeline.Run()
   0. git clone --depth 1 (if GitURL set)
@@ -182,6 +194,11 @@ pipeline.Run()
   3. scorer.Score()         → []ScoredDependency      (sorted desc)
   4. scorer.DetectConflicts → []ScoredDependency      (BlockedBy + CascadeGroup)
   5. advisor.Advise()       → []AdvisoryReport
+
+pipeline.RunMulti()
+  for each target (concurrent):
+    pipeline.Run() → []AdvisoryReport  (sets RepoSource = TargetLabel(target))
+  merge AllDeps → compute cross-repo counts → re-sort by updated score
 
 Packages:   models ← scanner, resolver, scorer, advisor
                   ↑
@@ -207,9 +224,11 @@ Packages:   models ← scanner, resolver, scorer, advisor
 | `advisor/advisor.go` | `Advisor` interface + `StubAdvisor` |
 | `advisor/anthropic.go` | `AnthropicAdvisor` — Anthropic API via forced tool use |
 | `pipeline/pipeline.go` | Orchestrates all stages, handles git clone |
+| `pipeline/multi.go` | `RunMulti`, `TargetLabel`, cross-repo score aggregation |
 | `store/store.go` | SQLite persistence |
 | `server/server.go` | REST API + SPA handler + URL auto-promotion |
 | `cmd/scan.go` | CLI scan subcommand |
+| `cmd/scan_multi.go` | CLI scan-multi subcommand |
 | `cmd/serve.go` | CLI serve subcommand |
 | `frontend/src/` | React dashboard |
 | `web/embed.go` | `//go:embed dist` |
@@ -233,7 +252,7 @@ modernc.org/sqlite v1.34.4
 These are open questions, not committed items. No explicit next-step has been agreed with the user yet.
 
 ### Score / signal quality
-- Cross-repo count is always 0 — the field exists in the model but nothing currently populates it (would need a multi-repo index or a crawl)
+- Cross-repo count is only populated in `scan-multi` / `POST /api/scans/multi` runs; single-repo scans always contribute 0 pts from that component
 - Version-gap scoring treats all major bumps equally; a v1→v2 bump on a library with 2 releases looks the same as log4j 2.14→3.0 with 26 releases
 - No differentiation between transitive and direct dependencies in risk scoring
 

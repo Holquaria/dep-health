@@ -12,10 +12,10 @@ import (
 
 // Weight constants — must sum to 1.0.
 const (
-	weightCVE          = 0.40
-	weightMajorGap     = 0.30
+	weightCVE           = 0.40
+	weightMajorGap      = 0.30
 	weightVersionBehind = 0.20
-	weightCrossRepo    = 0.10
+	weightCrossRepo     = 0.10
 )
 
 // Normalisation ceilings: anything at or above these values scores 1.0

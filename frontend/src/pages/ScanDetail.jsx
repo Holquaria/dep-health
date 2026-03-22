@@ -130,37 +130,15 @@ export default function ScanDetail() {
 
       {deps && deps.length > 0 && (
         <>
-          {/* Repo filter for multi scans */}
-          {isMulti && repos.length > 0 && (
-            <div className="flex gap-8 items-center mt-16" style={{ flexWrap: 'wrap' }}>
-              <span className="text-muted" style={{ fontSize: 12 }}>Filter by repo:</span>
-              <button
-                className={`btn ${!repoFilter ? 'btn-primary' : ''}`}
-                style={{ padding: '2px 10px', fontSize: 12 }}
-                onClick={() => setRepoFilter(null)}
-              >
-                All ({deps.length})
-              </button>
-              {repos.map(repo => {
-                const count = deps.filter(d => d.repo_source === repo).length
-                return (
-                  <button
-                    key={repo}
-                    className={`btn ${repoFilter === repo ? 'btn-primary' : ''}`}
-                    style={{ padding: '2px 10px', fontSize: 12 }}
-                    onClick={() => setRepoFilter(repoFilter === repo ? null : repo)}
-                  >
-                    {repo} ({count})
-                  </button>
-                )
-              })}
-            </div>
-          )}
-
-          <div className="card-title mt-16">
-            {visibleDeps.length} {repoFilter ? `deps in ${repoFilter}` : 'dependencies'}
+          <div style={{ marginTop: 16 }}>
+            <DepsTable
+              deps={deps}
+              showRepo={isMulti}
+              repos={repos}
+              repoFilter={repoFilter}
+              setRepoFilter={setRepoFilter}
+            />
           </div>
-          <DepsTable deps={deps} showRepo={isMulti} repoFilter={repoFilter} />
           <CascadePanel deps={visibleDeps} />
           <BlockedPanel deps={visibleDeps} />
           <MigrationHints deps={visibleDeps} />

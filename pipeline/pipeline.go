@@ -112,7 +112,12 @@ func Run(ctx context.Context, dir string, opts Options) ([]models.AdvisoryReport
 	progress("Generating advisory reports …")
 	var adv advisor.Advisor
 	if cfg.AnthropicAPIKey != "" {
-		adv = advisor.NewAnthropic(cfg.AnthropicAPIKey)
+		a, err := advisor.NewAnthropic(cfg.AnthropicAPIKey)
+		if err != nil {
+			adv = advisor.NewStub()
+		} else {
+			adv = a
+		}
 	} else {
 		adv = advisor.NewStub()
 	}

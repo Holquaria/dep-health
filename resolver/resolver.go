@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -127,12 +128,12 @@ func (r *Resolver) Enrich(ctx context.Context, deps []models.Dependency) ([]mode
 	wg.Wait()
 
 	if len(errs) > 0 {
-		fmt.Printf("warning: %d resolution error(s), first: %v\n", len(errs), errs[0])
+		fmt.Fprintf(os.Stderr, "warning: %d resolution error(s), first: %v\n", len(errs), errs[0])
 	}
 
 	// Single batch call to OSV.dev for all dependencies.
 	if err := r.enrichVulnerabilities(ctx, enriched); err != nil {
-		fmt.Printf("warning: vulnerability lookup failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warning: vulnerability lookup failed: %v\n", err)
 	}
 
 	return enriched, nil
@@ -165,8 +166,8 @@ type npmVersionMeta struct {
 
 // npmPackageInfo is the subset of the npm registry response we need.
 type npmPackageInfo struct {
-	DistTags map[string]string             `json:"dist-tags"`
-	Versions map[string]npmVersionMeta     `json:"versions"`
+	DistTags map[string]string         `json:"dist-tags"`
+	Versions map[string]npmVersionMeta `json:"versions"`
 }
 
 func (r *Resolver) resolveNPM(ctx context.Context, dep models.Dependency) (models.EnrichedDependency, error) {
@@ -641,8 +642,8 @@ type osvBatchRequest struct {
 }
 
 type osvVuln struct {
-	ID      string `json:"id"`
-	Summary string `json:"summary"`
+	ID       string `json:"id"`
+	Summary  string `json:"summary"`
 	Severity []struct {
 		Type  string `json:"type"`
 		Score string `json:"score"`

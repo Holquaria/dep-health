@@ -21,10 +21,10 @@ type Vulnerability struct {
 // EnrichedDependency embeds Dependency and adds registry and vulnerability data.
 type EnrichedDependency struct {
 	Dependency
-	LatestVersion   string            `json:"latest_version"`
-	SeverityGap     string            `json:"severity_gap"` // patch | minor | major
-	VersionsBehind  int               `json:"versions_behind"`
-	Vulnerabilities []Vulnerability   `json:"vulnerabilities"`
+	LatestVersion   string          `json:"latest_version"`
+	SeverityGap     string          `json:"severity_gap"` // patch | minor | major
+	VersionsBehind  int             `json:"versions_behind"`
+	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
 	// PeerConstraints maps peer package names to the semver constraint string
 	// declared by this package's *latest* version (e.g. {"react": "^19.0.0"}).
 	// Populated for npm packages; nil for other ecosystems.
@@ -34,12 +34,12 @@ type EnrichedDependency struct {
 // ScoredDependency embeds EnrichedDependency and adds risk scoring data.
 type ScoredDependency struct {
 	EnrichedDependency
-	RiskScore      float64  `json:"risk_score"`
-	CrossRepoCount int      `json:"cross_repo_count"`
+	RiskScore      float64 `json:"risk_score"`
+	CrossRepoCount int     `json:"cross_repo_count"`
 	// RepoSource identifies which repository this dependency came from.
 	// Set by pipeline.RunMulti; empty in single-repo scans.
-	RepoSource     string   `json:"repo_source,omitempty"`
-	Reasons        []string `json:"reasons"`
+	RepoSource string   `json:"repo_source,omitempty"`
+	Reasons    []string `json:"reasons"`
 	// BlockedBy lists peer packages whose *latest* version still cannot satisfy
 	// this package's peer constraint — meaning this upgrade has no safe path yet.
 	BlockedBy []string `json:"blocked_by,omitempty"`

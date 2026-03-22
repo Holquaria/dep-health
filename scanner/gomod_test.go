@@ -67,9 +67,9 @@ require (
 	}
 
 	want := map[string]string{
-		"github.com/spf13/cobra":  "v1.8.0",
+		"github.com/spf13/cobra":   "v1.8.0",
 		"github.com/gin-gonic/gin": "v1.9.1",
-		"golang.org/x/net":        "v0.20.0",
+		"golang.org/x/net":         "v0.20.0",
 	}
 	for name, wantVer := range want {
 		gotVer, ok := byName[name]
