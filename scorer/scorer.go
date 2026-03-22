@@ -54,9 +54,23 @@ func scoreDep(dep models.EnrichedDependency, crossRepoCounts map[string]int) mod
 		))
 	}
 
-	// ── Factor 2: Major version gap (30%) ────────────────────────────────────
-	gapFactor := versionGapFactor(dep.SeverityGap)
-	if gapFactor > 0 {
+	// ── Factor 2: Version gap (30%) — LTS-aware ────────────────────────────
+	gapFactor := ltsAwareGapFactor(dep)
+	if dep.SeverityGap == "major" && dep.LatestInMajor != "" && dep.LatestInMajor != dep.LatestVersion {
+		// New major exists but user may be on an active LTS line.
+		behindOnMajor := dep.CurrentVersion != dep.LatestInMajor
+		if behindOnMajor {
+			reasons = append(reasons, fmt.Sprintf(
+				"behind on current major line (%s → %s) and newer major available (%s)",
+				dep.CurrentVersion, dep.LatestInMajor, dep.LatestVersion,
+			))
+		} else {
+			reasons = append(reasons, fmt.Sprintf(
+				"current on your major line (%s); newer major available (%s)",
+				dep.CurrentVersion, dep.LatestVersion,
+			))
+		}
+	} else if gapFactor > 0 {
 		reasons = append(reasons, fmt.Sprintf(
 			"%s version gap (%s → %s)",
 			dep.SeverityGap, dep.CurrentVersion, dep.LatestVersion,
@@ -140,6 +154,23 @@ func maxSeverityLabel(vulns []models.Vulnerability) string {
 		return vulns[0].Severity
 	}
 	return "NONE"
+}
+
+// ltsAwareGapFactor computes the version-gap factor taking LatestInMajor into
+// account.  When the user is current on their major line but a new major exists,
+// the factor is reduced (informational, not urgent).
+func ltsAwareGapFactor(dep models.EnrichedDependency) float64 {
+	if dep.SeverityGap != "major" || dep.LatestInMajor == "" || dep.LatestInMajor == dep.LatestVersion {
+		// No LTS distinction possible — use the classic factor.
+		return versionGapFactor(dep.SeverityGap)
+	}
+	// A newer major exists and LatestInMajor is within the current line.
+	if dep.CurrentVersion == dep.LatestInMajor {
+		// Current on their major line — low urgency for the cross-major gap.
+		return 0.3
+	}
+	// Behind within their own major line AND a new major exists — full urgency.
+	return 1.0
 }
 
 // versionGapFactor converts a SeverityGap string to 0.0–1.0.

@@ -156,12 +156,71 @@ func (r *Resolver) resolveOne(ctx context.Context, dep models.Dependency) (model
 	}
 }
 
+// ── License extraction ────────────────────────────────────────────────────────
+
+// classifyLicense maps a license identifier string to a risk category.
+// Returns "permissive", "copyleft", "unknown" (present but unrecognised),
+// or "none" (empty — registry had no license field at all).
+func classifyLicense(license string) string {
+	if license == "" {
+		return "none"
+	}
+	upper := strings.ToUpper(license)
+
+	permissive := []string{
+		"MIT", "APACHE-2.0", "APACHE 2", "BSD-2-CLAUSE", "BSD-3-CLAUSE",
+		"ISC", "UNLICENSE", "0BSD", "WTFPL", "CC0", "ZLIB", "ARTISTIC-2",
+		"PYTHON-2", "PSF", "PUBLIC DOMAIN",
+	}
+	for _, p := range permissive {
+		if strings.Contains(upper, p) {
+			return "permissive"
+		}
+	}
+
+	copyleft := []string{
+		"GPL-2.0", "GPL-3.0", "AGPL-3.0", "LGPL-2.1", "LGPL-3.0",
+		"MPL-2.0", "EUPL", "CDDL", "EPL-",
+		// catch bare "GPL" / "AGPL" / "LGPL" without version
+		"GPL", "AGPL", "LGPL",
+	}
+	for _, c := range copyleft {
+		if strings.Contains(upper, c) {
+			return "copyleft"
+		}
+	}
+
+	return "unknown"
+}
+
 // ── npm registry ──────────────────────────────────────────────────────────────
 
 // npmVersionMeta holds the per-version fields we need from the npm registry.
 // The registry returns much more per version; we decode only what we use.
+// License can be a plain string ("MIT") or an object ({"type":"MIT","url":"..."});
+// we store it as raw JSON and normalise with parseNPMLicense.
 type npmVersionMeta struct {
 	PeerDependencies map[string]string `json:"peerDependencies"`
+	License          json.RawMessage   `json:"license"`
+}
+
+// parseNPMLicense normalises the npm license field, which may be a string or
+// an object with a "type" key.  Returns "" when the field is absent or empty.
+func parseNPMLicense(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.Type
+	}
+	return ""
 }
 
 // npmPackageInfo is the subset of the npm registry response we need.
@@ -205,24 +264,73 @@ func (r *Resolver) resolveNPM(ctx context.Context, dep models.Dependency) (model
 			fmt.Errorf("no 'latest' dist-tag for %s", dep.Name)
 	}
 
+	// Compute latest-in-major from the full version list.
+	var allVersionKeys []string
+	for v := range info.Versions {
+		allVersionKeys = append(allVersionKeys, v)
+	}
+	lim := findLatestInMajor(dep.CurrentVersion, parseSemverKeys(allVersionKeys))
+
 	gap := computeSeverityGap(dep.CurrentVersion, latest)
 	behind := countVersionsBehind(dep.CurrentVersion, latest, info.Versions)
 
-	// Extract peer dependency constraints declared by the *latest* version.
-	// These are used downstream by scorer.DetectConflicts to identify cascade
-	// upgrades and blocked dependencies.
+	// Extract peer dependency constraints and license from the latest version.
 	var peerConstraints map[string]string
-	if meta, ok := info.Versions[latest]; ok && len(meta.PeerDependencies) > 0 {
-		peerConstraints = meta.PeerDependencies
+	var license string
+	if meta, ok := info.Versions[latest]; ok {
+		if len(meta.PeerDependencies) > 0 {
+			peerConstraints = meta.PeerDependencies
+		}
+		license = parseNPMLicense(meta.License)
 	}
 
 	return models.EnrichedDependency{
 		Dependency:      dep,
 		LatestVersion:   latest,
+		LatestInMajor:   lim,
 		SeverityGap:     gap,
 		VersionsBehind:  behind,
 		PeerConstraints: peerConstraints,
+		License:         license,
+		LicenseRisk:     classifyLicense(license),
 	}, nil
+}
+
+// findLatestInMajor returns the highest version that shares the same major
+// version as current.  Returns "" if current cannot be parsed or no matching
+// version exists.
+func findLatestInMajor(current string, versions []*semver.Version) string {
+	cur, err := semver.NewVersion(current)
+	if err != nil {
+		return ""
+	}
+	var best *semver.Version
+	for _, v := range versions {
+		if v.Major() != cur.Major() {
+			continue
+		}
+		if v.Prerelease() != "" {
+			continue
+		}
+		if best == nil || v.GreaterThan(best) {
+			best = v
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	return best.Original()
+}
+
+// parseSemverKeys extracts valid semver versions from a set of string keys.
+func parseSemverKeys(keys []string) []*semver.Version {
+	var out []*semver.Version
+	for _, k := range keys {
+		if sv, err := semver.NewVersion(k); err == nil {
+			out = append(out, sv)
+		}
+	}
+	return out
 }
 
 // computeSeverityGap returns "major", "minor", or "patch" based on the
@@ -325,14 +433,20 @@ func (r *Resolver) resolveGoProxy(ctx context.Context, dep models.Dependency) (m
 	// but doesn't block the rest of the pipeline.
 	versionList, _ := r.goProxyList(ctx, base)
 
+	lim := findLatestInMajor(dep.CurrentVersion, parseSemverKeys(versionList))
+
 	gap := computeSeverityGap(dep.CurrentVersion, latest)
 	behind := countVersionsBehindList(dep.CurrentVersion, latest, versionList)
 
+	// Go module proxy does not expose license metadata.
+	// Future: resolve via GitHub API or licensecheck against the module zip.
 	return models.EnrichedDependency{
 		Dependency:     dep,
 		LatestVersion:  latest,
+		LatestInMajor:  lim,
 		SeverityGap:    gap,
 		VersionsBehind: behind,
+		LicenseRisk:    "unknown",
 	}, nil
 }
 
@@ -432,9 +546,29 @@ func countVersionsBehindList(current, latest string, versions []string) int {
 // pypiInfo is the subset of the PyPI JSON API response we need.
 type pypiInfo struct {
 	Info struct {
-		Version string `json:"version"`
+		Version     string   `json:"version"`
+		License     string   `json:"license"`
+		Classifiers []string `json:"classifiers"`
 	} `json:"info"`
 	Releases map[string]json.RawMessage `json:"releases"`
+}
+
+// extractPyPILicense prefers the classifier (e.g. "License :: OSI Approved :: MIT License")
+// over the free-text license field, which may contain the full license text.
+func extractPyPILicense(license string, classifiers []string) string {
+	for _, c := range classifiers {
+		if strings.HasPrefix(c, "License :: ") {
+			parts := strings.SplitN(c, " :: ", 3)
+			if len(parts) == 3 && parts[2] != "" {
+				return parts[2]
+			}
+		}
+	}
+	// Truncate free-text license fields that are longer than a typical SPDX ID.
+	if len(license) > 60 {
+		return ""
+	}
+	return license
 }
 
 // resolvePyPI fetches the latest version for a Python package from pypi.org.
@@ -472,14 +606,25 @@ func (r *Resolver) resolvePyPI(ctx context.Context, dep models.Dependency) (mode
 			fmt.Errorf("no version found in PyPI response for %s", dep.Name)
 	}
 
+	// Compute latest-in-major from the releases map.
+	var releaseKeys []string
+	for v := range info.Releases {
+		releaseKeys = append(releaseKeys, v)
+	}
+	lim := findLatestInMajor(dep.CurrentVersion, parseSemverKeys(releaseKeys))
+
 	gap := computeSeverityGap(dep.CurrentVersion, latest)
 	behind := countVersionsBehindPyPI(dep.CurrentVersion, latest, info.Releases)
 
+	lic := extractPyPILicense(info.Info.License, info.Info.Classifiers)
 	return models.EnrichedDependency{
 		Dependency:     dep,
 		LatestVersion:  latest,
+		LatestInMajor:  lim,
 		SeverityGap:    gap,
 		VersionsBehind: behind,
+		License:        lic,
+		LicenseRisk:    classifyLicense(lic),
 	}, nil
 }
 
@@ -549,14 +694,22 @@ func (r *Resolver) resolveMaven(ctx context.Context, dep models.Dependency) (mod
 	// Request 2: full version list for VersionsBehind (best-effort).
 	versions, _ := r.mavenVersionList(ctx, g, a)
 
+	lim := findLatestInMajor(dep.CurrentVersion, parseSemverKeys(versions))
+
 	gap := computeSeverityGap(dep.CurrentVersion, latest)
 	behind := countVersionsBehindList(dep.CurrentVersion, latest, versions)
 
+	// TODO: extract license from Maven Central POM metadata.
+	// Maven Central's Solr API does not return license data; a separate fetch
+	// of the artifact's POM file (https://repo1.maven.org/maven2/.../pom) is
+	// required to read the <licenses> element.
 	return models.EnrichedDependency{
 		Dependency:     dep,
 		LatestVersion:  latest,
+		LatestInMajor:  lim,
 		SeverityGap:    gap,
 		VersionsBehind: behind,
+		LicenseRisk:    "unknown",
 	}, nil
 }
 

@@ -234,6 +234,83 @@ func TestResolveNPM_MultipleDependencies(t *testing.T) {
 	}
 }
 
+// ── LatestInMajor ─────────────────────────────────────────────────────────────
+
+func TestResolveNPM_LatestInMajor(t *testing.T) {
+	// Versions span two major lines: 4.17.x and 5.x.
+	// Current is 4.17.11 → LatestInMajor should be 4.17.21, LatestVersion should be 5.1.0.
+	body := mockNPMResponse("5.1.0", map[string]map[string]string{
+		"4.17.11": nil,
+		"4.17.15": nil,
+		"4.17.21": nil,
+		"5.0.0":   nil,
+		"5.1.0":   nil,
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/express", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	})
+	mux.HandleFunc("/v1/querybatch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(mockOSVEmpty(1))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	res := newTestResolver(server)
+	enriched, err := res.Enrich(context.Background(), []models.Dependency{
+		{Name: "express", CurrentVersion: "4.17.11", Ecosystem: "npm"},
+	})
+	if err != nil {
+		t.Fatalf("Enrich failed: %v", err)
+	}
+
+	dep := enriched[0]
+	if dep.LatestVersion != "5.1.0" {
+		t.Errorf("LatestVersion = %q, want \"5.1.0\"", dep.LatestVersion)
+	}
+	if dep.LatestInMajor != "4.17.21" {
+		t.Errorf("LatestInMajor = %q, want \"4.17.21\"", dep.LatestInMajor)
+	}
+}
+
+func TestResolveNPM_LatestInMajor_SameLine(t *testing.T) {
+	// All versions on the same major line — LatestInMajor should equal LatestVersion.
+	body := mockNPMResponse("4.17.21", map[string]map[string]string{
+		"4.17.11": nil,
+		"4.17.21": nil,
+	})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lodash", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	})
+	mux.HandleFunc("/v1/querybatch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(mockOSVEmpty(1))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	res := newTestResolver(server)
+	enriched, err := res.Enrich(context.Background(), []models.Dependency{
+		{Name: "lodash", CurrentVersion: "4.17.11", Ecosystem: "npm"},
+	})
+	if err != nil {
+		t.Fatalf("Enrich failed: %v", err)
+	}
+
+	dep := enriched[0]
+	if dep.LatestInMajor != "4.17.21" {
+		t.Errorf("LatestInMajor = %q, want \"4.17.21\"", dep.LatestInMajor)
+	}
+}
+
 // ── Registry error handling ───────────────────────────────────────────────────
 
 func TestResolveNPM_RegistryNotFound(t *testing.T) {

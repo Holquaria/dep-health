@@ -95,6 +95,9 @@ CREATE TABLE IF NOT EXISTS scan_deps (
 		`ALTER TABLE scan_runs ADD COLUMN targets  TEXT    NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE scan_deps ADD COLUMN repo_source      TEXT    NOT NULL DEFAULT ''`,
 		`ALTER TABLE scan_deps ADD COLUMN cross_repo_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE scan_deps ADD COLUMN latest_in_major  TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE scan_deps ADD COLUMN license          TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE scan_deps ADD COLUMN license_risk     TEXT    NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range additive {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -161,8 +164,9 @@ INSERT INTO scan_deps (
 	run_id, name, ecosystem, manifest_path, current_ver, latest_ver,
 	severity_gap, versions_behind, risk_score, cascade_group, blocked_by,
 	peer_constraints, vulnerabilities, reasons, summary, breaking_changes,
-	migration_steps, repo_source, cross_repo_count
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	migration_steps, repo_source, cross_repo_count, latest_in_major,
+	license, license_risk
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -185,7 +189,8 @@ INSERT INTO scan_deps (
 			string(blockedBy), string(peers), string(vulns),
 			string(reasons), r.Summary,
 			string(breaking), string(steps),
-			r.RepoSource, r.CrossRepoCount,
+			r.RepoSource, r.CrossRepoCount, r.LatestInMajor,
+			r.License, r.LicenseRisk,
 		); err != nil {
 			return err
 		}
@@ -234,7 +239,8 @@ func (s *Store) GetScan(id int64) (ScanRun, []models.AdvisoryReport, error) {
 		        severity_gap, versions_behind, risk_score, cascade_group,
 		        blocked_by, peer_constraints, vulnerabilities, reasons,
 		        summary, breaking_changes, migration_steps,
-		        repo_source, cross_repo_count
+		        repo_source, cross_repo_count, latest_in_major,
+		        license, license_risk
 		 FROM scan_deps WHERE run_id=? ORDER BY risk_score DESC`, id)
 	if err != nil {
 		return run, nil, err
@@ -253,7 +259,8 @@ func (s *Store) GetScan(id int64) (ScanRun, []models.AdvisoryReport, error) {
 			&blockedBy, &peers, &vulns,
 			&reasons, &r.Summary,
 			&breaking, &steps,
-			&r.RepoSource, &r.CrossRepoCount,
+			&r.RepoSource, &r.CrossRepoCount, &r.LatestInMajor,
+			&r.License, &r.LicenseRisk,
 		); err != nil {
 			return run, nil, err
 		}

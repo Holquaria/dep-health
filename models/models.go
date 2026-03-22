@@ -22,13 +22,20 @@ type Vulnerability struct {
 type EnrichedDependency struct {
 	Dependency
 	LatestVersion   string          `json:"latest_version"`
-	SeverityGap     string          `json:"severity_gap"` // patch | minor | major
+	LatestInMajor   string          `json:"latest_in_major"` // newest version within the same major line
+	SeverityGap     string          `json:"severity_gap"`    // patch | minor | major
 	VersionsBehind  int             `json:"versions_behind"`
 	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
 	// PeerConstraints maps peer package names to the semver constraint string
 	// declared by this package's *latest* version (e.g. {"react": "^19.0.0"}).
 	// Populated for npm packages; nil for other ecosystems.
 	PeerConstraints map[string]string `json:"peer_constraints,omitempty"`
+	// License is the SPDX identifier (or best-effort string) extracted from the
+	// package registry.  Empty when the registry does not expose license metadata.
+	License string `json:"license"`
+	// LicenseRisk classifies the license: "permissive", "copyleft", "unknown",
+	// or "none" (no license field at all in the registry response).
+	LicenseRisk string `json:"license_risk"`
 }
 
 // ScoredDependency embeds EnrichedDependency and adds risk scoring data.

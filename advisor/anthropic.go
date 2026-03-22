@@ -123,6 +123,20 @@ func buildAnthropicPrompt(dep models.ScoredDependency) string {
 	fmt.Fprintf(&b, "Package:    %s (%s)\n", dep.Name, dep.Ecosystem)
 	fmt.Fprintf(&b, "Upgrade:    %s → %s (%s version bump, %d releases behind)\n",
 		dep.CurrentVersion, dep.LatestVersion, dep.SeverityGap, dep.VersionsBehind)
+
+	// Include LTS / major-line context when available.
+	if dep.LatestInMajor != "" && dep.LatestInMajor != dep.LatestVersion {
+		if dep.CurrentVersion == dep.LatestInMajor {
+			fmt.Fprintf(&b, "Major line: current on %s (latest in this major line); absolute latest is %s\n",
+				dep.LatestInMajor, dep.LatestVersion)
+		} else {
+			fmt.Fprintf(&b, "Major line: latest in current major line is %s (you're on %s); absolute latest is %s\n",
+				dep.LatestInMajor, dep.CurrentVersion, dep.LatestVersion)
+		}
+		fmt.Fprintf(&b, "Consider whether the current major line is still receiving security patches (LTS).\n")
+		fmt.Fprintf(&b, "If so, recommend upgrading within the major line first, then planning the cross-major migration separately.\n")
+	}
+
 	fmt.Fprintf(&b, "Risk score: %.1f / 100\n", dep.RiskScore)
 
 	if len(dep.Vulnerabilities) > 0 {

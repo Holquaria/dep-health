@@ -251,6 +251,106 @@ func TestDetectConflicts_GroupIDIsDeterministic(t *testing.T) {
 	}
 }
 
+// ── LTS-aware scoring ─────────────────────────────────────────────────────────
+
+func TestScore_CurrentOnMajorLine_ReducedScore(t *testing.T) {
+	// User is on 4.17.21 (latest in major 4), but absolute latest is 5.1.0.
+	// Score should be lower than if they were behind on their own major line.
+	deps := []models.EnrichedDependency{
+		{
+			Dependency: models.Dependency{
+				Name: "express", CurrentVersion: "4.17.21", Ecosystem: "npm",
+			},
+			LatestVersion:  "5.1.0",
+			LatestInMajor:  "4.17.21",
+			SeverityGap:    "major",
+			VersionsBehind: 2,
+		},
+	}
+	scored := scorer.Score(deps, nil)
+	if len(scored) != 1 {
+		t.Fatalf("expected 1 scored dep, got %d", len(scored))
+	}
+
+	// The gap factor should be 0.3 (reduced) rather than 1.0.
+	if scored[0].RiskScore >= 30 {
+		t.Errorf("score %.1f too high for dep current on its major line; expected reduced score", scored[0].RiskScore)
+	}
+
+	// Verify the reason mentions being current on major line.
+	foundReason := false
+	for _, r := range scored[0].Reasons {
+		if strings.Contains(r, "current on your major line") {
+			foundReason = true
+			break
+		}
+	}
+	if !foundReason {
+		t.Errorf("expected 'current on your major line' reason, got %v", scored[0].Reasons)
+	}
+}
+
+func TestScore_BehindOnMajorLine_FullScore(t *testing.T) {
+	// User is on 4.17.11, latest in major 4 is 4.17.21, absolute latest is 5.1.0.
+	// Should get full gap weight since they're behind even on their own line.
+	deps := []models.EnrichedDependency{
+		{
+			Dependency: models.Dependency{
+				Name: "express", CurrentVersion: "4.17.11", Ecosystem: "npm",
+			},
+			LatestVersion:  "5.1.0",
+			LatestInMajor:  "4.17.21",
+			SeverityGap:    "major",
+			VersionsBehind: 5,
+		},
+	}
+	scored := scorer.Score(deps, nil)
+	if len(scored) != 1 {
+		t.Fatalf("expected 1 scored dep, got %d", len(scored))
+	}
+
+	// Gap factor should be 1.0 (full), contributing 0.30*1.0*100 = 30.0.
+	if scored[0].RiskScore < 30 {
+		t.Errorf("score %.1f too low for dep behind on its major line", scored[0].RiskScore)
+	}
+
+	// Verify the reason mentions being behind on current major line.
+	foundReason := false
+	for _, r := range scored[0].Reasons {
+		if strings.Contains(r, "behind on current major line") {
+			foundReason = true
+			break
+		}
+	}
+	if !foundReason {
+		t.Errorf("expected 'behind on current major line' reason, got %v", scored[0].Reasons)
+	}
+}
+
+func TestScore_NoLatestInMajor_ClassicBehavior(t *testing.T) {
+	// When LatestInMajor is empty, fall back to classic scoring.
+	deps := []models.EnrichedDependency{
+		{
+			Dependency: models.Dependency{
+				Name: "lodash", CurrentVersion: "3.10.0", Ecosystem: "npm",
+			},
+			LatestVersion:  "4.17.21",
+			LatestInMajor:  "",
+			SeverityGap:    "major",
+			VersionsBehind: 10,
+		},
+	}
+	scored := scorer.Score(deps, nil)
+	if len(scored) != 1 {
+		t.Fatalf("expected 1 scored dep, got %d", len(scored))
+	}
+
+	// Should use the classic versionGapFactor: major = 1.0.
+	if scored[0].RiskScore < 30 {
+		t.Errorf("score %.1f too low for classic major gap scoring", scored[0].RiskScore)
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func findDep(t *testing.T, deps []models.ScoredDependency, name string) models.ScoredDependency {

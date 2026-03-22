@@ -116,7 +116,7 @@ func printTable(reports []models.AdvisoryReport) {
 		tablewriter.WithRowAlignmentConfig(tw.CellAlignment{Global: tw.AlignLeft}),
 		tablewriter.WithRowAutoWrap(tw.WrapTruncate),
 	)
-	table.Header("# ", "Package", "Current", "Latest", "Gap", "Behind", "CVEs", "Score", "Flags", "Top Reason")
+	table.Header("# ", "Package", "Current", "Latest", "Major Latest", "Gap", "Behind", "CVEs", "Score", "Flags", "Top Reason")
 
 	for i, r := range reports {
 		cveStr := "-"
@@ -141,11 +141,19 @@ func printTable(reports []models.AdvisoryReport) {
 			flags = "CASCADE"
 		}
 
+		// Show LatestInMajor only when it differs from LatestVersion (i.e. a
+		// newer major line exists and the current major has its own latest).
+		majorLatestStr := "-"
+		if r.LatestInMajor != "" && r.LatestInMajor != r.LatestVersion {
+			majorLatestStr = r.LatestInMajor
+		}
+
 		table.Append([]string{ //nolint:errcheck
 			fmt.Sprintf("%d", i+1),
 			r.Name,
 			r.CurrentVersion,
 			orDash(r.LatestVersion),
+			majorLatestStr,
 			gapStr,
 			fmt.Sprintf("%d", r.VersionsBehind),
 			cveStr,
@@ -155,7 +163,7 @@ func printTable(reports []models.AdvisoryReport) {
 		})
 	}
 
-	table.Footer("", "", "", "", "", "", "", "",
+	table.Footer("", "", "", "", "", "", "", "", "",
 		fmt.Sprintf("%d", len(reports)),
 		"total",
 	)

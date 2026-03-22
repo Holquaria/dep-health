@@ -1,6 +1,6 @@
 # dep-health — Progress Tracker
 
-> Last updated: 2026-03-21 (session 4)
+> Last updated: 2026-03-22 (session 6)
 > Use this file to orient a new agent or pick up after a context reset.
 
 ---
@@ -43,6 +43,8 @@ dep-health serve --port 8080
 
 All tests pass: `go test ./...`
 
+One-command startup: `./serve.sh` (builds frontend, compiles binary, starts server)
+
 ---
 
 ## Checklist
@@ -50,7 +52,7 @@ All tests pass: `go test ./...`
 ### Models (`models/models.go`)
 
 - [x] `Dependency` struct (Name, CurrentVersion, Ecosystem, ManifestPath, RepoURL)
-- [x] `EnrichedDependency` struct (embeds Dependency + LatestVersion, SeverityGap, VersionsBehind, Vulnerabilities, PeerConstraints)
+- [x] `EnrichedDependency` struct (embeds Dependency + LatestVersion, SeverityGap, VersionsBehind, Vulnerabilities, PeerConstraints, **License**, **LicenseRisk**)
 - [x] `Vulnerability` struct (ID, Severity, Summary, URL)
 - [x] `ScoredDependency` struct (embeds EnrichedDependency + RiskScore, CrossRepoCount, **RepoSource**, Reasons, BlockedBy, CascadeGroup)
 - [x] `AdvisoryReport` struct (embeds ScoredDependency + Summary, BreakingChanges, MigrationSteps, PRUrl)
@@ -72,12 +74,13 @@ All tests pass: `go test ./...`
 
 ### Resolver (`resolver/resolver.go`)
 
-- [x] npm registry lookup — `registry.npmjs.org/{pkg}`, `dist-tags.latest`, peer constraints
-- [x] Go module proxy — `proxy.golang.org/{module}/@latest` + `@v/list`
-- [x] PyPI JSON API — `pypi.org/pypi/{pkg}/json`, pre-releases excluded from versions-behind count
-- [x] Maven Central search API — `search.maven.org/solrsearch/select`, `g:{g}+AND+a:{a}`, `core=gav` for version list
+- [x] npm registry lookup — `registry.npmjs.org/{pkg}`, `dist-tags.latest`, peer constraints, **license extraction** (`versions[latest].license`, handles string or `{type}` object)
+- [x] Go module proxy — `proxy.golang.org/{module}/@latest` + `@v/list`; license set to `"unknown"` (proxy API has no license data; future: GitHub API or licensecheck)
+- [x] PyPI JSON API — `pypi.org/pypi/{pkg}/json`, pre-releases excluded from versions-behind count; **license extraction** prefers `info.classifiers` (`License :: OSI Approved :: ...`), falls back to `info.license` (truncated if free-text)
+- [x] Maven Central search API — `search.maven.org/solrsearch/select`, `g:{g}+AND+a:{a}`, `core=gav` for version list; license set to `"unknown"` (TODO: fetch POM `<licenses>` element)
 - [x] OSV.dev batch API — single `POST /v1/querybatch` for all packages; ecosystem mapping: npm→npm, pypi→PyPI, go→Go, maven→Maven
 - [x] Peer constraint extraction — `versions[latest].peerDependencies` → `PeerConstraints map[string]string`
+- [x] **`classifyLicense(string) string`** — MIT/Apache/BSD/ISC/Unlicense → `"permissive"`, GPL/AGPL/LGPL/MPL → `"copyleft"`, empty → `"none"`, unrecognised → `"unknown"`
 - [x] Concurrent lookups — goroutines + semaphore (`chan struct{}`), configurable via `DEP_HEALTH_MAX_CONCURRENCY` (default 10)
 - [x] Testable via injected URLs — `NPMRegistryURL`, `OSVBatchURL`, `PyPIRegistryURL`, `MavenCentralURL` fields on `Resolver`
 - [x] Tests — `resolver_test.go` with `httptest` mock server (peer constraints, versions-behind, 404, concurrent batch)
@@ -98,6 +101,30 @@ All tests pass: `go test ./...`
 - [x] `AnthropicAdvisor` — `advisor/anthropic.go`, forced `record_advisory` tool call for structured JSON output, activated via `ANTHROPIC_API_KEY`, falls back to stub on any error
 - [x] Tests — `advisor_test.go`, 8 cases (summary content, major/minor breaking changes, NPM/PyPI/Go ecosystem steps, CVE step, determinism, embedded dep)
 - [ ] Changelog fetching — GitHub Releases API / CHANGELOG.md scraping (not started)
+
+### License risk signal (session 6)
+
+- [x] `License string` + `LicenseRisk string` fields on `EnrichedDependency` — flow through the full pipeline to JSON API
+- [x] `classifyLicense()` helper in `resolver/resolver.go` — SPDX-aware, covers most common OSS licenses
+- [x] npm: extracts from `versions[latest].license` (handles string or `{"type":"..."}` object via `parseNPMLicense`)
+- [x] PyPI: prefers classifier (`License :: OSI Approved :: MIT License`), falls back to `info.license`, truncates free-text fields >60 chars
+- [x] Go modules: `LicenseRisk = "unknown"` — proxy API has no license data (future: GitHub API / licensecheck)
+- [x] Maven: `LicenseRisk = "unknown"` — Solr search API has no license data (TODO: fetch POM `<licenses>`)
+- [x] Store: `license` + `license_risk` columns added as additive migration
+- [x] Dashboard: `LicenseBadge` next to each package name + LICENSE filter chip row
+- [x] Not included in scoring formula — surface only
+
+### Code quality fixes (session 5)
+
+- [x] `advisor.NewAnthropic` returns `(*AnthropicAdvisor, error)` instead of panicking on empty key — caller in `pipeline.go` falls back to stub
+- [x] `server/server.go` — removed all `//nolint:errcheck` on JSON writes; `jsonOK`/`jsonError` now marshal first (catchable error → 500 before headers sent), `SaveDeps` goroutine errors logged via `log.Printf`
+- [x] `resolver/resolver.go` — resolution warnings changed from `fmt.Printf` (stdout) to `fmt.Fprintf(os.Stderr, ...)` — stdout no longer polluted for library or piped use
+- [x] Test coverage: added `store/store_test.go` (7 tests), `pipeline/pipeline_test.go` (4 tests), `server/server_test.go` (8 tests) — all happy-path + error cases, no network calls
+
+### Tooling (session 5)
+
+- [x] `serve.sh` — single-command build + serve from a clean checkout; prerequisite checks for `go`/`node`/`npm`; `PORT` and `DB` env var overrides; uses `exec` so the shell is replaced by the server process
+- [x] `dep-report.md` — full dependency advisory report for the dep-health repo itself, authored by Claude; includes CVE breakdown, cascade group analysis, and ordered upgrade plan
 
 ### Pipeline (`pipeline/pipeline.go` + `pipeline/multi.go`)
 
@@ -131,6 +158,7 @@ All tests pass: `go test ./...`
 - [x] WAL mode + foreign keys enabled
 - [x] `is_multi` + `targets` columns on `scan_runs` — `CreateMultiScanRun(targets []string)` stores JSON-encoded target list, `dir="N repos"`
 - [x] `repo_source` + `cross_repo_count` columns on `scan_deps` — populated by multi-repo scans
+- [x] **`license` + `license_risk` columns on `scan_deps`** — additive migration, wired into `SaveDeps` and `GetScan`
 - [x] Additive `ALTER TABLE ADD COLUMN` migrations — safe against existing databases (duplicate-column-name errors suppressed)
 
 ### Server (`server/server.go`)
@@ -161,6 +189,8 @@ All tests pass: `go test ./...`
 - [x] Multi-repo mode in `ScanList` — dynamic list of target inputs, `+Add another` / `✕` remove, submits to `POST /api/scans/multi`
 - [x] Multi-repo history rows — show `"N repos (target1, target2, ...)"` label and `MULTI-REPO` badge
 - [x] Multi-repo `ScanDetail` — aggregate stats card (repos, outdated deps, CVEs, cascade groups, blocked), repo filter buttons, `Repo` column in `DepsTable`, `computeStats()` derived client-side from deps
+- [x] **`LicenseBadge`** inline component — green for permissive (shows SPDX id), orange for copyleft, grey for unknown/none; renders next to each package name
+- [x] **LICENSE filter row** in `DepsTable` filter bar — All / Permissive / Copyleft / Unknown chips; "Unknown" matches both `unknown` and `none` risk values
 
 ### Test fixtures (`testdata/`)
 
@@ -238,12 +268,25 @@ Packages:   models ← scanner, resolver, scorer, advisor
 ```
 github.com/anthropics/anthropic-sdk-go v1.27.1
 github.com/BurntSushi/toml v1.6.0
-github.com/Masterminds/semver/v3 v3.2.1
-github.com/olekukonko/tablewriter v0.0.5
-github.com/spf13/cobra v1.8.1
-golang.org/x/mod v0.22.0
-modernc.org/sqlite v1.34.4
+github.com/Masterminds/semver/v3 v3.4.0   ← upgraded
+github.com/fatih/color v1.18.0             ← new (direct, via tablewriter v1)
+github.com/olekukonko/tablewriter v1.1.4   ← upgraded (breaking API change migrated)
+github.com/spf13/cobra v1.10.2             ← upgraded
+golang.org/x/mod v0.34.0                   ← upgraded
+modernc.org/sqlite v1.47.0                 ← upgraded
 ```
+
+### Dependencies (frontend/package.json)
+
+```
+react               18.3.1 → 19.2.4   ← upgraded
+react-dom           18.3.1 → 19.2.4   ← upgraded
+react-router-dom    6.23.1 → 7.13.1   ← upgraded
+vite                5.3.1  → 8.0.1    ← upgraded (all 11 CVEs resolved; requires Node ≥22.12)
+@vitejs/plugin-react 4.3.1 → 6.0.1   ← upgraded
+```
+
+**Upgrade branch:** `chore/dependency-upgrades` (5 commits, all tests passing, not yet merged to main)
 
 ---
 
@@ -275,6 +318,7 @@ These are open questions, not committed items. No explicit next-step has been ag
 - No export (CSV / JSON) from the dashboard
 - No search across scan history
 - Scan duration on the list page is computed client-side; clock skew between server and browser can make it wrong
+- No `--exclude` flag on `scan` — testdata fixtures are picked up when scanning the dep-health repo itself; workaround is `--json` + filter by `manifest_path`
 
 ### Observability / ops
 - No structured logging on the server (just stderr from the pipeline)
@@ -298,10 +342,19 @@ These are open questions, not committed items. No explicit next-step has been ag
 ## Build instructions
 
 ```bash
+# One command — build everything and start the server (recommended)
+./serve.sh                  # PORT=8080 DB=dep-health.db by default
+PORT=9000 ./serve.sh        # custom port
+```
+
+Or step by step:
+
+```bash
 # Go dependencies
 go mod tidy
 
 # Build and run frontend (required before go build)
+# Node ≥22.12 required for vite 8
 cd frontend && npm install && npm run build && cd ..
 
 # Compile binary (embeds frontend)
