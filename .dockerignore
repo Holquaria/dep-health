@@ -1,0 +1,8 @@
+frontend/node_modules
+web/dist
+dep-health
+dep-health.db
+dep-health.db-shm
+dep-health.db-wal
+*.md
+.git
