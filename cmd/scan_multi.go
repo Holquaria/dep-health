@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 
 	"dep-health/models"
@@ -85,27 +86,12 @@ func runScanMulti(cmd *cobra.Command, args []string) error {
 
 func printMultiTable(reports []models.AdvisoryReport) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{
-		"#", "Repo", "Package", "Current", "Latest", "Gap", "Behind", "CVEs", "Score",
-	})
-	table.SetBorder(true)
-	table.SetRowLine(false)
-	table.SetAutoWrapText(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetColMinWidth(1, 20) // Repo
-	table.SetColMinWidth(2, 25) // Package
-
-	scoreColours := func(score float64) tablewriter.Colors {
-		switch {
-		case score >= 70:
-			return tablewriter.Colors{tablewriter.FgRedColor, tablewriter.Bold}
-		case score >= 40:
-			return tablewriter.Colors{tablewriter.FgYellowColor}
-		default:
-			return tablewriter.Colors{tablewriter.FgGreenColor}
-		}
-	}
+	table.Options(
+		tablewriter.WithHeaderAlignmentConfig(tw.CellAlignment{Global: tw.AlignLeft}),
+		tablewriter.WithRowAlignmentConfig(tw.CellAlignment{Global: tw.AlignLeft}),
+		tablewriter.WithRowAutoWrap(tw.WrapTruncate),
+	)
+	table.Header("#", "Repo", "Package", "Current", "Latest", "Gap", "Behind", "CVEs", "Score")
 
 	for i, r := range reports {
 		cveStr := "-"
@@ -116,29 +102,22 @@ func printMultiTable(reports []models.AdvisoryReport) {
 		if r.LatestVersion == "" {
 			gapStr = "n/a"
 		}
-		table.Rich(
-			[]string{
-				fmt.Sprintf("%d", i+1),
-				r.RepoSource,
-				r.Name,
-				r.CurrentVersion,
-				orDash(r.LatestVersion),
-				gapStr,
-				fmt.Sprintf("%d", r.VersionsBehind),
-				cveStr,
-				fmt.Sprintf("%.1f", r.RiskScore),
-			},
-			[]tablewriter.Colors{
-				{}, {}, {}, {}, {}, {}, {}, {},
-				scoreColours(r.RiskScore),
-			},
-		)
+		table.Append([]string{ //nolint:errcheck
+			fmt.Sprintf("%d", i+1),
+			r.RepoSource,
+			r.Name,
+			r.CurrentVersion,
+			orDash(r.LatestVersion),
+			gapStr,
+			fmt.Sprintf("%d", r.VersionsBehind),
+			cveStr,
+			colorScore(r.RiskScore, fmt.Sprintf("%.1f", r.RiskScore)),
+		})
 	}
 
-	table.SetFooter([]string{
-		"", "", "", "", "", "", "", "",
+	table.Footer("", "", "", "", "", "", "", "",
 		fmt.Sprintf("%d total", len(reports)),
-	})
-	table.Render()
+	)
+	table.Render() //nolint:errcheck
 	fmt.Println()
 }

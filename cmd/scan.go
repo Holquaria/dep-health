@@ -7,7 +7,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/cobra"
 
 	"dep-health/models"
@@ -109,36 +111,12 @@ const colMaxReasons = 55
 
 func printTable(reports []models.AdvisoryReport) {
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{
-		"#", "Package", "Current", "Latest", "Gap", "Behind", "CVEs", "Score", "Flags", "Top Reason",
-	})
-	table.SetBorder(true)
-	table.SetRowLine(false)
-	table.SetAutoWrapText(false)
-	table.SetHeaderAlignment(tablewriter.ALIGN_LEFT)
-	table.SetAlignment(tablewriter.ALIGN_LEFT)
-	table.SetColMinWidth(1, 25) // Package column
-
-	scoreColours := func(score float64) tablewriter.Colors {
-		switch {
-		case score >= 70:
-			return tablewriter.Colors{tablewriter.FgRedColor, tablewriter.Bold}
-		case score >= 40:
-			return tablewriter.Colors{tablewriter.FgYellowColor}
-		default:
-			return tablewriter.Colors{tablewriter.FgGreenColor}
-		}
-	}
-	flagColours := func(flags string) tablewriter.Colors {
-		switch flags {
-		case "BLOCKED":
-			return tablewriter.Colors{tablewriter.FgRedColor, tablewriter.Bold}
-		case "CASCADE":
-			return tablewriter.Colors{tablewriter.FgYellowColor}
-		default:
-			return tablewriter.Colors{}
-		}
-	}
+	table.Options(
+		tablewriter.WithHeaderAlignmentConfig(tw.CellAlignment{Global: tw.AlignLeft}),
+		tablewriter.WithRowAlignmentConfig(tw.CellAlignment{Global: tw.AlignLeft}),
+		tablewriter.WithRowAutoWrap(tw.WrapTruncate),
+	)
+	table.Header("# ", "Package", "Current", "Latest", "Gap", "Behind", "CVEs", "Score", "Flags", "Top Reason")
 
 	for i, r := range reports {
 		cveStr := "-"
@@ -163,39 +141,52 @@ func printTable(reports []models.AdvisoryReport) {
 			flags = "CASCADE"
 		}
 
-		table.Rich(
-			[]string{
-				fmt.Sprintf("%d", i+1),
-				r.Name,
-				r.CurrentVersion,
-				orDash(r.LatestVersion),
-				gapStr,
-				fmt.Sprintf("%d", r.VersionsBehind),
-				cveStr,
-				fmt.Sprintf("%.1f", r.RiskScore),
-				flags,
-				topReason,
-			},
-			[]tablewriter.Colors{
-				{}, {}, {}, {}, {}, {}, {},
-				scoreColours(r.RiskScore),
-				flagColours(flags),
-				{},
-			},
-		)
+		table.Append([]string{ //nolint:errcheck
+			fmt.Sprintf("%d", i+1),
+			r.Name,
+			r.CurrentVersion,
+			orDash(r.LatestVersion),
+			gapStr,
+			fmt.Sprintf("%d", r.VersionsBehind),
+			cveStr,
+			colorScore(r.RiskScore, fmt.Sprintf("%.1f", r.RiskScore)),
+			colorFlags(flags),
+			topReason,
+		})
 	}
 
-	table.SetFooter([]string{
-		"", "", "", "", "", "", "", "",
+	table.Footer("", "", "", "", "", "", "", "",
 		fmt.Sprintf("%d", len(reports)),
 		"total",
-	})
-	table.Render()
+	)
+	table.Render() //nolint:errcheck
 
 	fmt.Println()
 	printMigrationHints(reports)
 	printCascadeGroups(reports)
 	printBlockedDeps(reports)
+}
+
+func colorScore(score float64, s string) string {
+	switch {
+	case score >= 70:
+		return color.New(color.FgRed, color.Bold).Sprint(s)
+	case score >= 40:
+		return color.New(color.FgYellow).Sprint(s)
+	default:
+		return color.New(color.FgGreen).Sprint(s)
+	}
+}
+
+func colorFlags(flags string) string {
+	switch flags {
+	case "BLOCKED":
+		return color.New(color.FgRed, color.Bold).Sprint(flags)
+	case "CASCADE":
+		return color.New(color.FgYellow).Sprint(flags)
+	default:
+		return flags
+	}
 }
 
 // printMigrationHints shows the top-3 migration step lists beneath the table.
