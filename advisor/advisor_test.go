@@ -177,6 +177,61 @@ func TestStubAdvisor_CVEMigrationStep(t *testing.T) {
 	}
 }
 
+// TestStubAdvisor_TwoPhaseMigration verifies two-phase guidance when
+// LatestInMajor differs from LatestVersion and user is behind on their line.
+func TestStubAdvisor_TwoPhaseMigration(t *testing.T) {
+	adv := advisor.NewStub()
+	dep := makeScored("express", "npm", "4.17.11", "5.1.0", "major", 0)
+	dep.LatestInMajor = "4.17.21"
+
+	report, err := adv.Advise(context.Background(), dep)
+	if err != nil {
+		t.Fatalf("Advise returned error: %v", err)
+	}
+
+	// Should contain Phase 1 (upgrade within major) and Phase 2 (cross-major).
+	var hasPhase1, hasPhase2, hasInMajorTarget bool
+	for _, step := range report.MigrationSteps {
+		if strings.Contains(step, "Phase 1") {
+			hasPhase1 = true
+		}
+		if strings.Contains(step, "Phase 2") {
+			hasPhase2 = true
+		}
+		if strings.Contains(step, "4.17.21") {
+			hasInMajorTarget = true
+		}
+	}
+	if !hasPhase1 {
+		t.Errorf("expected Phase 1 in migration steps, got %v", report.MigrationSteps)
+	}
+	if !hasPhase2 {
+		t.Errorf("expected Phase 2 in migration steps, got %v", report.MigrationSteps)
+	}
+	if !hasInMajorTarget {
+		t.Errorf("expected LatestInMajor (4.17.21) in migration steps, got %v", report.MigrationSteps)
+	}
+}
+
+// TestStubAdvisor_SinglePhaseMigration verifies no two-phase guidance when
+// LatestInMajor equals LatestVersion (single major line).
+func TestStubAdvisor_SinglePhaseMigration(t *testing.T) {
+	adv := advisor.NewStub()
+	dep := makeScored("lodash", "npm", "4.17.11", "4.17.21", "patch", 0)
+	dep.LatestInMajor = "4.17.21"
+
+	report, err := adv.Advise(context.Background(), dep)
+	if err != nil {
+		t.Fatalf("Advise returned error: %v", err)
+	}
+
+	for _, step := range report.MigrationSteps {
+		if strings.Contains(step, "Phase 1") || strings.Contains(step, "Phase 2") {
+			t.Errorf("should not have phased migration when LatestInMajor == LatestVersion, got step: %s", step)
+		}
+	}
+}
+
 // TestStubAdvisor_Deterministic verifies identical inputs produce identical outputs.
 func TestStubAdvisor_Deterministic(t *testing.T) {
 	adv := advisor.NewStub()

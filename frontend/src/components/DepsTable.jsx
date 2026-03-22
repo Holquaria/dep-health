@@ -40,6 +40,32 @@ function Chip({ label, active, onClick }) {
   )
 }
 
+function LicenseBadge({ license, licenseRisk }) {
+  if (!licenseRisk || licenseRisk === 'none' || licenseRisk === 'unknown') {
+    return (
+      <span style={{
+        display: 'inline-block', marginLeft: 6, padding: '1px 5px',
+        fontSize: 10, borderRadius: 3, lineHeight: '14px',
+        background: '#3a3a3a', color: '#888', border: '1px solid #555',
+      }}>
+        {licenseRisk === 'unknown' ? 'Unknown' : '—'}
+      </span>
+    )
+  }
+  const iscopyleft = licenseRisk === 'copyleft'
+  return (
+    <span style={{
+      display: 'inline-block', marginLeft: 6, padding: '1px 5px',
+      fontSize: 10, borderRadius: 3, lineHeight: '14px',
+      background: iscopyleft ? '#3d2200' : '#0d2b1a',
+      color: iscopyleft ? '#f59e0b' : '#34d399',
+      border: `1px solid ${iscopyleft ? '#7c4a0044' : '#05966944'}`,
+    }}>
+      {license || (iscopyleft ? 'Copyleft' : 'Permissive')}
+    </span>
+  )
+}
+
 export default function DepsTable({
   deps,
   showRepo = false,
@@ -53,6 +79,7 @@ export default function DepsTable({
   const [severity, setSeverity] = useState('all')
   const [hasCves, setHasCves] = useState(false)
   const [cascadeOnly, setCascadeOnly] = useState(false)
+  const [licenseRisk, setLicenseRisk] = useState('all')
   const [sortKey, setSortKey] = useState('score')
   const [sortDir, setSortDir] = useState('desc')
 
@@ -106,8 +133,16 @@ export default function DepsTable({
       list = list.filter(d => !!d.cascade_group)
     }
 
+    if (licenseRisk !== 'all') {
+      list = list.filter(d => {
+        const lr = d.license_risk || 'unknown'
+        if (licenseRisk === 'unknown') return lr === 'unknown' || lr === 'none'
+        return lr === licenseRisk
+      })
+    }
+
     return list
-  }, [allDeps, repoFilter, debouncedSearch, ecosystem, severity, hasCves, cascadeOnly])
+  }, [allDeps, repoFilter, debouncedSearch, ecosystem, severity, hasCves, cascadeOnly, licenseRisk])
 
   const sorted = useMemo(() => {
     const list = [...filtered]
@@ -185,7 +220,16 @@ export default function DepsTable({
           ))}
         </div>
 
-        {/* Row 4: repo chips (multi-repo only) */}
+        {/* Row 4: license chips */}
+        <div className="flex gap-8 items-center" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
+          <span className="text-muted" style={{ fontSize: 11, minWidth: 70 }}>LICENSE</span>
+          <Chip label="All" active={licenseRisk === 'all'} onClick={() => setLicenseRisk('all')} />
+          <Chip label="Permissive" active={licenseRisk === 'permissive'} onClick={() => setLicenseRisk('permissive')} />
+          <Chip label="Copyleft" active={licenseRisk === 'copyleft'} onClick={() => setLicenseRisk('copyleft')} />
+          <Chip label="Unknown" active={licenseRisk === 'unknown'} onClick={() => setLicenseRisk('unknown')} />
+        </div>
+
+        {/* Row 5: repo chips (multi-repo only) */}
         {repos.length > 0 && setRepoFilter && (
           <div className="flex gap-8 items-center" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
             <span className="text-muted" style={{ fontSize: 11, minWidth: 70 }}>REPO</span>
@@ -264,6 +308,7 @@ export default function DepsTable({
                     )}
                     <td>
                       <strong>{d.name}</strong>
+                      <LicenseBadge license={d.license} licenseRisk={d.license_risk} />
                       <br />
                       <span className="text-muted monospace">{d.ecosystem}</span>
                     </td>
