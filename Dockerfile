@@ -19,7 +19,7 @@ RUN go build -o dep-health .
 
 # ── Stage 3: minimal runtime ──────────────────────────────────────────────────
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates git
 WORKDIR /app
 COPY --from=builder /app/dep-health .
 
