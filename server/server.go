@@ -43,10 +43,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /api/scans", s.listScans)
-	s.mux.HandleFunc("GET /api/scans/{id}", s.getScan)
-	s.mux.HandleFunc("POST /api/scans", s.triggerScan)
-	s.mux.HandleFunc("POST /api/scans/multi", s.triggerMultiScan)
+	// API routes are wrapped with session middleware so every request
+	// carries an anonymous session ID.
+	api := http.NewServeMux()
+	api.HandleFunc("GET /api/scans", s.listScans)
+	api.HandleFunc("GET /api/scans/{id}", s.getScan)
+	api.HandleFunc("POST /api/scans", s.triggerScan)
+	api.HandleFunc("POST /api/scans/multi", s.triggerMultiScan)
+
+	s.mux.Handle("/api/", sessionMiddleware(api))
 
 	// SPA fallback — all other requests serve the React app.
 	s.mux.Handle("/", spaHandler())
@@ -55,7 +60,7 @@ func (s *Server) routes() {
 // ── API handlers ──────────────────────────────────────────────────────────────
 
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
-	runs, err := s.store.ListScans()
+	runs, err := s.store.ListScans(sessionID(r))
 	if err != nil {
 		jsonError(w, err, http.StatusInternalServerError)
 		return
@@ -69,7 +74,7 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, fmt.Errorf("invalid id"), http.StatusBadRequest)
 		return
 	}
-	run, deps, err := s.store.GetScan(id)
+	run, deps, err := s.store.GetScan(id, sessionID(r))
 	if err != nil {
 		jsonError(w, err, http.StatusNotFound)
 		return
@@ -111,7 +116,8 @@ func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 		scanDir = req.GitURL // placeholder; pipeline.Run will clone it
 	}
 
-	runID, err := s.store.CreateScanRun(scanDir, req.RepoURL)
+	sid := sessionID(r)
+	runID, err := s.store.CreateScanRun(scanDir, req.RepoURL, sid)
 	if err != nil {
 		jsonError(w, err, http.StatusInternalServerError)
 		return
@@ -169,7 +175,8 @@ func (s *Server) triggerMultiScan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runID, err := s.store.CreateMultiScanRun(req.Targets)
+	sid := sessionID(r)
+	runID, err := s.store.CreateMultiScanRun(req.Targets, sid)
 	if err != nil {
 		jsonError(w, err, http.StatusInternalServerError)
 		return

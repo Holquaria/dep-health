@@ -8,6 +8,8 @@ import (
 	"dep-health/store"
 )
 
+const testSession = "test-session-abc"
+
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
 	s, err := store.New(":memory:")
@@ -21,7 +23,7 @@ func newTestStore(t *testing.T) *store.Store {
 func TestCreateAndFinishScanRun(t *testing.T) {
 	s := newTestStore(t)
 
-	id, err := s.CreateScanRun("/tmp/proj", "https://github.com/org/repo")
+	id, err := s.CreateScanRun("/tmp/proj", "https://github.com/org/repo", testSession)
 	if err != nil {
 		t.Fatalf("CreateScanRun: %v", err)
 	}
@@ -33,7 +35,7 @@ func TestCreateAndFinishScanRun(t *testing.T) {
 		t.Fatalf("FinishScanRun: %v", err)
 	}
 
-	run, deps, err := s.GetScan(id)
+	run, deps, err := s.GetScan(id, testSession)
 	if err != nil {
 		t.Fatalf("GetScan: %v", err)
 	}
@@ -51,13 +53,13 @@ func TestCreateAndFinishScanRun(t *testing.T) {
 func TestFinishScanRunWithError(t *testing.T) {
 	s := newTestStore(t)
 
-	id, _ := s.CreateScanRun("/tmp/proj", "")
+	id, _ := s.CreateScanRun("/tmp/proj", "", testSession)
 	scanErr := fmt.Errorf("clone failed") //nolint:goerr113
 	if err := s.FinishScanRun(id, scanErr); err != nil {
 		t.Fatalf("FinishScanRun: %v", err)
 	}
 
-	run, _, err := s.GetScan(id)
+	run, _, err := s.GetScan(id, testSession)
 	if err != nil {
 		t.Fatalf("GetScan: %v", err)
 	}
@@ -72,7 +74,7 @@ func TestFinishScanRunWithError(t *testing.T) {
 func TestSaveDepsAndGetScan(t *testing.T) {
 	s := newTestStore(t)
 
-	id, _ := s.CreateScanRun("/tmp/proj", "")
+	id, _ := s.CreateScanRun("/tmp/proj", "", testSession)
 
 	reports := []models.AdvisoryReport{
 		{
@@ -99,7 +101,7 @@ func TestSaveDepsAndGetScan(t *testing.T) {
 	}
 	s.FinishScanRun(id, nil)
 
-	_, got, err := s.GetScan(id)
+	_, got, err := s.GetScan(id, testSession)
 	if err != nil {
 		t.Fatalf("GetScan: %v", err)
 	}
@@ -121,12 +123,12 @@ func TestSaveDepsAndGetScan(t *testing.T) {
 func TestListScans(t *testing.T) {
 	s := newTestStore(t)
 
-	id1, _ := s.CreateScanRun("/proj/a", "")
-	id2, _ := s.CreateScanRun("/proj/b", "")
+	id1, _ := s.CreateScanRun("/proj/a", "", testSession)
+	id2, _ := s.CreateScanRun("/proj/b", "", testSession)
 	s.FinishScanRun(id1, nil)
 	s.FinishScanRun(id2, nil)
 
-	runs, err := s.ListScans()
+	runs, err := s.ListScans(testSession)
 	if err != nil {
 		t.Fatalf("ListScans: %v", err)
 	}
@@ -143,12 +145,12 @@ func TestCreateMultiScanRun(t *testing.T) {
 	s := newTestStore(t)
 
 	targets := []string{"https://github.com/org/a", "https://github.com/org/b"}
-	id, err := s.CreateMultiScanRun(targets)
+	id, err := s.CreateMultiScanRun(targets, testSession)
 	if err != nil {
 		t.Fatalf("CreateMultiScanRun: %v", err)
 	}
 
-	run, _, err := s.GetScan(id)
+	run, _, err := s.GetScan(id, testSession)
 	if err != nil {
 		t.Fatalf("GetScan: %v", err)
 	}
@@ -163,13 +165,13 @@ func TestCreateMultiScanRun(t *testing.T) {
 func TestRecoverStuckScans(t *testing.T) {
 	s := newTestStore(t)
 
-	id, _ := s.CreateScanRun("/tmp/proj", "") // status = "running"
+	id, _ := s.CreateScanRun("/tmp/proj", "", testSession) // status = "running"
 
 	if err := s.RecoverStuckScans(); err != nil {
 		t.Fatalf("RecoverStuckScans: %v", err)
 	}
 
-	run, _, err := s.GetScan(id)
+	run, _, err := s.GetScan(id, testSession)
 	if err != nil {
 		t.Fatalf("GetScan: %v", err)
 	}
@@ -181,9 +183,69 @@ func TestRecoverStuckScans(t *testing.T) {
 func TestGetScanNotFound(t *testing.T) {
 	s := newTestStore(t)
 
-	_, _, err := s.GetScan(9999)
+	_, _, err := s.GetScan(9999, testSession)
 	if err == nil {
 		t.Error("expected error for missing scan, got nil")
 	}
 }
 
+// ── Session isolation ─────────────────────────────────────────────────────────
+
+func TestSessionIsolation_ListScans(t *testing.T) {
+	s := newTestStore(t)
+
+	// Session A creates a scan.
+	idA, _ := s.CreateScanRun("/proj/a", "", "session-a")
+	s.FinishScanRun(idA, nil)
+
+	// Session B creates a scan.
+	idB, _ := s.CreateScanRun("/proj/b", "", "session-b")
+	s.FinishScanRun(idB, nil)
+
+	// Session A should only see its own scan.
+	runsA, err := s.ListScans("session-a")
+	if err != nil {
+		t.Fatalf("ListScans(a): %v", err)
+	}
+	if len(runsA) != 1 {
+		t.Fatalf("session-a: expected 1 run, got %d", len(runsA))
+	}
+	if runsA[0].ID != idA {
+		t.Errorf("session-a: expected run id=%d, got id=%d", idA, runsA[0].ID)
+	}
+
+	// Session B should only see its own scan.
+	runsB, err := s.ListScans("session-b")
+	if err != nil {
+		t.Fatalf("ListScans(b): %v", err)
+	}
+	if len(runsB) != 1 {
+		t.Fatalf("session-b: expected 1 run, got %d", len(runsB))
+	}
+	if runsB[0].ID != idB {
+		t.Errorf("session-b: expected run id=%d, got id=%d", idB, runsB[0].ID)
+	}
+}
+
+func TestSessionIsolation_GetScan(t *testing.T) {
+	s := newTestStore(t)
+
+	// Session A creates a scan.
+	idA, _ := s.CreateScanRun("/proj/a", "", "session-a")
+	s.FinishScanRun(idA, nil)
+
+	// Session B should NOT be able to view session A's scan.
+	_, _, err := s.GetScan(idA, "session-b")
+	if err == nil {
+		t.Error("expected error when session-b tries to get session-a's scan, got nil")
+	}
+
+	// Session A should be able to view its own scan.
+	run, _, err := s.GetScan(idA, "session-a")
+	if err != nil {
+		t.Fatalf("GetScan(a): %v", err)
+	}
+	if run.SessionID != "session-a" {
+		t.Errorf("expected session_id=session-a, got %q", run.SessionID)
+	}
+}

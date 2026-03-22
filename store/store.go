@@ -16,6 +16,7 @@ import (
 // ScanRun represents a single pipeline execution stored in the database.
 type ScanRun struct {
 	ID         int64      `json:"id"`
+	SessionID  string     `json:"session_id"`
 	Dir        string     `json:"dir"`
 	RepoURL    string     `json:"repo_url"`
 	IsMulti    bool       `json:"is_multi"`
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS scan_deps (
 		`ALTER TABLE scan_deps ADD COLUMN latest_in_major  TEXT    NOT NULL DEFAULT ''`,
 		`ALTER TABLE scan_deps ADD COLUMN license          TEXT    NOT NULL DEFAULT ''`,
 		`ALTER TABLE scan_deps ADD COLUMN license_risk     TEXT    NOT NULL DEFAULT ''`,
+		`ALTER TABLE scan_runs ADD COLUMN session_id       TEXT    NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range additive {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -110,10 +112,10 @@ CREATE TABLE IF NOT EXISTS scan_deps (
 }
 
 // CreateScanRun inserts a new single-repo scan_run row with status "running".
-func (s *Store) CreateScanRun(dir, repoURL string) (int64, error) {
+func (s *Store) CreateScanRun(dir, repoURL, sessionID string) (int64, error) {
 	res, err := s.db.Exec(
-		`INSERT INTO scan_runs (dir, repo_url, status, started_at) VALUES (?, ?, 'running', ?)`,
-		dir, repoURL, time.Now().UTC().Format(time.RFC3339),
+		`INSERT INTO scan_runs (dir, repo_url, session_id, status, started_at) VALUES (?, ?, ?, 'running', ?)`,
+		dir, repoURL, sessionID, time.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create scan run: %w", err)
@@ -122,13 +124,13 @@ func (s *Store) CreateScanRun(dir, repoURL string) (int64, error) {
 }
 
 // CreateMultiScanRun inserts a multi-repo scan_run row with status "running".
-func (s *Store) CreateMultiScanRun(targets []string) (int64, error) {
+func (s *Store) CreateMultiScanRun(targets []string, sessionID string) (int64, error) {
 	targetsJSON, _ := json.Marshal(targets)
 	dir := fmt.Sprintf("%d repos", len(targets))
 	res, err := s.db.Exec(
-		`INSERT INTO scan_runs (dir, repo_url, is_multi, targets, status, started_at)
-		 VALUES (?, '', 1, ?, 'running', ?)`,
-		dir, string(targetsJSON), time.Now().UTC().Format(time.RFC3339),
+		`INSERT INTO scan_runs (dir, repo_url, is_multi, targets, session_id, status, started_at)
+		 VALUES (?, '', 1, ?, ?, 'running', ?)`,
+		dir, string(targetsJSON), sessionID, time.Now().UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create multi scan run: %w", err)
@@ -198,11 +200,11 @@ INSERT INTO scan_deps (
 	return tx.Commit()
 }
 
-// ListScans returns all scan runs in descending order of start time.
-func (s *Store) ListScans() ([]ScanRun, error) {
+// ListScans returns scan runs belonging to the given session, newest first.
+func (s *Store) ListScans(sessionID string) ([]ScanRun, error) {
 	rows, err := s.db.Query(
-		`SELECT id, dir, repo_url, is_multi, targets, status, started_at, finished_at, error
-		 FROM scan_runs ORDER BY id DESC`)
+		`SELECT id, session_id, dir, repo_url, is_multi, targets, status, started_at, finished_at, error
+		 FROM scan_runs WHERE session_id = ? ORDER BY id DESC`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,15 +213,16 @@ func (s *Store) ListScans() ([]ScanRun, error) {
 }
 
 // GetScan returns the scan run and its dependency reports for the given ID.
-func (s *Store) GetScan(id int64) (ScanRun, []models.AdvisoryReport, error) {
+// Returns an error if the scan does not belong to the given session.
+func (s *Store) GetScan(id int64, sessionID string) (ScanRun, []models.AdvisoryReport, error) {
 	var run ScanRun
 	var startedStr string
 	var finishedStr sql.NullString
 	var targetsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, dir, repo_url, is_multi, targets, status, started_at, finished_at, error
-		 FROM scan_runs WHERE id=?`, id,
-	).Scan(&run.ID, &run.Dir, &run.RepoURL, &run.IsMulti, &targetsJSON,
+		`SELECT id, session_id, dir, repo_url, is_multi, targets, status, started_at, finished_at, error
+		 FROM scan_runs WHERE id=? AND session_id=?`, id, sessionID,
+	).Scan(&run.ID, &run.SessionID, &run.Dir, &run.RepoURL, &run.IsMulti, &targetsJSON,
 		&run.Status, &startedStr, &finishedStr, &run.Error)
 	if err == sql.ErrNoRows {
 		return ScanRun{}, nil, fmt.Errorf("scan %d not found", id)
@@ -293,7 +296,7 @@ func scanRunsFromRows(rows *sql.Rows) ([]ScanRun, error) {
 		var startedStr string
 		var finishedStr sql.NullString
 		var targetsJSON string
-		if err := rows.Scan(&r.ID, &r.Dir, &r.RepoURL, &r.IsMulti, &targetsJSON,
+		if err := rows.Scan(&r.ID, &r.SessionID, &r.Dir, &r.RepoURL, &r.IsMulti, &targetsJSON,
 			&r.Status, &startedStr, &finishedStr, &r.Error); err != nil {
 			return nil, err
 		}
